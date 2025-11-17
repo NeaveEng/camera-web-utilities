@@ -1,0 +1,11 @@
+{
+  "auto_exposure": true,
+  "exposure": 0,
+  "auto_gain": true,
+  "gain": 0,
+  "white_balance": "auto",
+  "saturation": 1,
+  "edge_enhancement": 0,
+  "rotation": "rotate-180",
+  "stream_resolution": "1280x720"
+}

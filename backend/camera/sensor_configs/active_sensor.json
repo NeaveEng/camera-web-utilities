@@ -1,0 +1,8 @@
+{
+  "sensor": "IMX477",
+  "custom_fps_map": {
+    "1920x1080": 60,
+    "3840x2160": 30
+  },
+  "custom_default_fps": 30
+}

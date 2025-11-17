@@ -1,0 +1,9 @@
+{
+    "exposure": 33333333,
+    "auto_exposure": false,
+    "gain": 1.2,
+    "auto_gain": false,
+    "white_balance": "incandescent",
+    "saturation": 1.1,
+    "edge_enhancement": 0.2
+}

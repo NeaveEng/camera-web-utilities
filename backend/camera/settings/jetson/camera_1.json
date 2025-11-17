@@ -1,0 +1,12 @@
+{
+  "exposure": 0,
+  "auto_exposure": true,
+  "gain": 0,
+  "auto_gain": true,
+  "white_balance": "auto",
+  "saturation": 1.0,
+  "edge_enhancement": 0.0,
+  "rotation": "rotate-180",
+  "stream_resolution": "1280x720",
+  "camera_name": "right"
+}

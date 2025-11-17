@@ -1,0 +1,9 @@
+{
+    "exposure": 100000000,
+    "auto_exposure": false,
+    "gain": 4.0,
+    "auto_gain": false,
+    "white_balance": "auto",
+    "saturation": 1.0,
+    "edge_enhancement": -0.2
+}
