@@ -9,6 +9,7 @@ An extensible, multi-hardware camera streaming platform with support for Jetson 
 - **Camera Groups**: Create stereo pairs or multi-camera groups
 - **Real-Time Controls**: Adjust exposure, white balance, gain, and other camera settings during streaming
 - **Dual-Stream Architecture**: High-resolution for processing, compressed preview for web
+- **Camera Calibration**: Single and stereo camera calibration using ChArUco boards
 - **Extensible Plugin System**: Add calibration, object detection, and other features
 - **Workflow System**: Step-by-step guided processes for setup and calibration
 - **Profile Management**: Save and apply camera settings profiles
@@ -31,10 +32,13 @@ backend/
 │   ├── base.py              # Abstract feature plugin interface
 │   ├── manager.py           # Plugin discovery and management
 │   └── plugins/             # Feature plugin implementations
+│       ├── calibration.py   # Camera calibration plugin
+│       └── CALIBRATION.md   # Calibration documentation
 ├── workflows/
 │   ├── base.py              # Abstract workflow interface
 │   ├── manager.py           # Workflow management
 │   └── templates/           # Global workflow templates
+│       └── calibration.py   # Calibration workflows
 └── app.py                   # Flask application with REST API
 
 frontend/
@@ -44,6 +48,7 @@ frontend/
 
 data/
 ├── camera_groups/           # Saved camera group configurations
+├── calibration/             # Calibration data and sessions
 └── workflows/
     └── state/               # Workflow instance states
 ```
