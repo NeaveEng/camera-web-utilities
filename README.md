@@ -306,7 +306,7 @@ pip install -r requirements.txt --force-reinstall
 
 ## License
 
-MIT License (or your preferred license)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
