@@ -75,3 +75,6 @@ Thumbs.db
 
 # Project specific
 index.html
+
+# Calibration data
+data/calibration/*/

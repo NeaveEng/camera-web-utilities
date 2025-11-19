@@ -461,6 +461,15 @@ function renderControls(slot, cameraId, controls, resolutionInfo) {
     // Add profile section
     html += renderProfileSection(cameraId);
 
+    // Add calibration button
+    html += `
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+            <button class="btn btn-primary" onclick="openCalibrationForCamera('${cameraId}')" style="width: 100%;">
+                📐 Calibrate Camera
+            </button>
+        </div>
+    `;
+
     container.innerHTML = html;
 
     // Attach event listeners
@@ -1315,6 +1324,35 @@ let calibrationData = {
     results: null
 };
 
+// Coverage map tracking
+let coverageMapCanvas = null;
+let coverageMapContext = null;
+let coverageMapData = [];  // Stores detected marker positions
+let captureCount = 0;  // Track number of captures
+
+// Auto-capture tracking
+let autoCaptureEnabled = false;
+let autoCaptureInterval = 3;  // Default 3 seconds
+let autoCaptureTimer = null;
+let lastCaptureMarkers = null;  // Store last capture's marker positions for movement detection
+const MIN_MARKER_MOVEMENT = 50;  // Minimum pixel movement required (average across all markers)
+
+// Pose diversity tracking for calibration quality
+let poseCounts = {
+    center: 0,
+    topLeft: 0,
+    topRight: 0,
+    bottomLeft: 0,
+    bottomRight: 0,
+    topEdge: 0,
+    bottomEdge: 0,
+    leftEdge: 0,
+    rightEdge: 0,
+    tilted: 0,
+    close: 0,
+    far: 0
+};
+
 // Initialize calibration wizard
 function initializeCalibrationWizard() {
     const calibrationBtn = document.getElementById('calibration-btn');
@@ -1356,14 +1394,32 @@ function openCalibrationWizard() {
         },
         target_images: 20,
         captured_images: [],
-        results: null
+        results: null,
+        session_name: null  // Will be auto-generated on first capture
     };
 
     // Populate camera selector
     populateCalibrationCameraSelect();
 
+    // Load previous calibration sessions
+    loadPreviousCalibrationSessions();
+
     // Show first step
     showWizardStep(1);
+}
+
+function openCalibrationForCamera(cameraId) {
+    // Open the wizard
+    openCalibrationWizard();
+
+    // Set the camera
+    calibrationData.camera_id = cameraId;
+    const cameraSelect = document.getElementById('calibration-camera-select');
+    if (cameraSelect) {
+        cameraSelect.value = cameraId;
+        // Trigger the preview update
+        updateSetupCameraPreview(cameraId);
+    }
 }
 
 function closeCalibrationWizard() {
@@ -1521,6 +1577,16 @@ async function validateWizardStep(stepNumber) {
 // ============================================================================
 
 function setupSetupStepListeners() {
+    // Previous calibration session selector
+    const previousCalibrationSelect = document.getElementById('previous-calibration-select');
+    if (previousCalibrationSelect) {
+        previousCalibrationSelect.addEventListener('change', async (e) => {
+            if (e.target.value) {
+                await loadPreviousCalibration(e.target.value);
+            }
+        });
+    }
+
     // Camera selection change handler
     const cameraSelect = document.getElementById('calibration-camera-select');
     if (cameraSelect) {
@@ -1560,6 +1626,167 @@ function setupSetupStepListeners() {
 
     // Initialize board info
     updateBoardInfo();
+}
+
+async function loadPreviousCalibrationSessions() {
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/sessions`);
+        const data = await response.json();
+
+        const select = document.getElementById('previous-calibration-select');
+        if (!select) return;
+
+        // Clear existing options except the first one
+        select.innerHTML = '<option value="">Start new calibration...</option>';
+
+        if (data.success && data.sessions && data.sessions.length > 0) {
+            data.sessions.forEach(session => {
+                const option = document.createElement('option');
+                option.value = session.path;
+                option.textContent = `${session.camera_id} - ${session.date} (${session.image_count} images)`;
+                select.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('Failed to load previous calibration sessions:', error);
+    }
+}
+
+async function loadPreviousCalibration(sessionPath) {
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/session/${encodeURIComponent(sessionPath)}`);
+        const data = await response.json();
+
+        if (!data.success) {
+            await showAlert('Error', data.message || 'Failed to load calibration session');
+            return;
+        }
+
+        const session = data.session;
+
+        // Populate calibration data
+        calibrationData.camera_id = session.camera_id;
+        calibrationData.model = session.model || 'pinhole';
+        calibrationData.board = session.board_config || calibrationData.board;
+        calibrationData.target_images = session.target_images || 20;
+        calibrationData.captured_images = session.images || [];
+        calibrationData.session_name = session.path;  // Use the session path as session name
+
+        // Reset and rebuild pose counts and coverage map
+        Object.keys(poseCounts).forEach(key => {
+            poseCounts[key] = 0;
+        });
+        coverageMapData = [];
+        captureCount = 0;
+
+        // Get camera resolution for coverage map
+        let imageWidth = 1920;
+        let imageHeight = 1080;
+
+        // Process each image's detection data
+        session.images.forEach((image, index) => {
+            if (image.detection && image.detection.detected) {
+                const detection = image.detection;
+
+                // Update image dimensions
+                if (detection.image_width && detection.image_height) {
+                    imageWidth = detection.image_width;
+                    imageHeight = detection.image_height;
+                }
+
+                // Increment capture count
+                captureCount++;
+
+                // Update pose counts
+                if (detection.poses && Array.isArray(detection.poses)) {
+                    detection.poses.forEach(pose => {
+                        if (poseCounts.hasOwnProperty(pose)) {
+                            poseCounts[pose]++;
+                        }
+                    });
+                }
+
+                // Add marker positions to coverage map
+                if (detection.marker_corners && Array.isArray(detection.marker_corners)) {
+                    detection.marker_corners.forEach((corners, markerIndex) => {
+                        // Calculate center of this marker
+                        let centerX = 0, centerY = 0;
+                        corners.forEach(point => {
+                            centerX += point[0];
+                            centerY += point[1];
+                        });
+                        centerX /= corners.length;
+                        centerY /= corners.length;
+
+                        // Add marker position
+                        coverageMapData.push({
+                            x: centerX,
+                            y: centerY,
+                            captureNumber: captureCount,
+                            markerIndex: markerIndex,
+                            totalMarkers: detection.markers_detected,
+                            corners: detection.corners_detected,
+                            poses: detection.poses || []
+                        });
+                    });
+                }
+            }
+        });
+
+        // Initialize coverage map canvas with proper dimensions
+        if (coverageMapCanvas) {
+            coverageMapCanvas.width = imageWidth;
+            coverageMapCanvas.height = imageHeight;
+        }
+
+        // Update UI
+        document.getElementById('calibration-camera-select').value = session.camera_id;
+        document.getElementById('calibration-model').value = session.model || 'pinhole';
+        document.getElementById('target-images').value = session.target_images || 20;
+
+        // Update board configuration
+        if (session.board_config) {
+            document.getElementById('board-width').value = session.board_config.width || 8;
+            document.getElementById('board-height').value = session.board_config.height || 5;
+            document.getElementById('square-length').value = session.board_config.square_length || 50;
+            document.getElementById('marker-length').value = session.board_config.marker_length || 37;
+            document.getElementById('aruco-dictionary').value = session.board_config.dictionary || 'DICT_6X6_100';
+            updateBoardInfo();
+        }
+
+        // Update camera preview
+        await updateSetupCameraPreview(session.camera_id);
+
+        // Update capture stats
+        updateCaptureStats();
+
+        // Initialize coverage map canvas if not already done
+        if (!coverageMapCanvas) {
+            coverageMapCanvas = document.getElementById('coverage-map-canvas');
+            if (coverageMapCanvas) {
+                coverageMapContext = coverageMapCanvas.getContext('2d');
+                coverageMapCanvas.width = imageWidth;
+                coverageMapCanvas.height = imageHeight;
+            }
+        }
+
+        // Redraw coverage map with loaded data
+        if (coverageMapContext) {
+            drawCoverageMap();
+            // Hide placeholder
+            const placeholder = document.querySelector('.coverage-map-placeholder');
+            if (placeholder) placeholder.style.display = 'none';
+        }
+
+        // Update pose diversity stats
+        updatePoseDiversityStats();
+
+        await showAlert('Session Loaded', `Loaded calibration session with ${session.images.length} captured images.\n\nPose diversity: ${captureCount} captures analyzed.\n\nYou can continue capturing or proceed to calibration.`);
+
+    } catch (error) {
+        console.error('Failed to load calibration session:', error);
+        await showAlert('Error', 'Failed to load calibration session: ' + error.message);
+    }
 }
 
 function applyBoardPreset(preset) {
@@ -1683,6 +1910,15 @@ function setupCaptureStepListeners() {
     document.getElementById('start-capture').addEventListener('click', toggleCalibrationCamera);
     document.getElementById('capture-image').addEventListener('click', captureCalibrationImage);
     document.getElementById('clear-captures').addEventListener('click', clearCapturedImages);
+    document.getElementById('toggle-auto-capture').addEventListener('click', toggleAutoCapture);
+    document.getElementById('auto-capture-interval').addEventListener('change', (e) => {
+        autoCaptureInterval = parseInt(e.target.value);
+        if (autoCaptureEnabled) {
+            // Restart auto-capture with new interval
+            stopAutoCapture();
+            startAutoCapture();
+        }
+    });
 }
 
 async function initializeCapturePreview() {
@@ -1744,8 +1980,38 @@ async function startCalibrationCamera() {
                  style="max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block;">
         `;
 
+        // Get camera resolution to initialize coverage map
+        const resResponse = await fetch(`${API_BASE}/api/cameras/${cameraId}/controls`);
+        const resData = await resResponse.json();
+
+        let canvasWidth = 1920;
+        let canvasHeight = 1080;
+
+        if (resData.success && resData.resolution_info) {
+            canvasWidth = resData.resolution_info.capture_width || 1920;
+            canvasHeight = resData.resolution_info.capture_height || 1080;
+        }
+
+        // Initialize coverage map canvas with actual camera resolution
+        coverageMapCanvas = document.getElementById('coverage-map-canvas');
+        coverageMapContext = coverageMapCanvas.getContext('2d');
+        coverageMapData = [];
+        captureCount = 0;
+
+        // Set canvas size to match camera resolution
+        coverageMapCanvas.width = canvasWidth;
+        coverageMapCanvas.height = canvasHeight;
+
+        // Draw initial empty coverage map
+        drawCoverageMap();
+
+        // Hide placeholder
+        const placeholder = document.querySelector('.coverage-map-placeholder');
+        if (placeholder) placeholder.style.display = 'none';
+
         calibrationCameraActive = true;
         document.getElementById('capture-image').disabled = false;
+        document.getElementById('toggle-auto-capture').disabled = false;
 
         // Update pattern status periodically (just for the status text)
         startPatternDetection();
@@ -1759,6 +2025,16 @@ async function startCalibrationCamera() {
 function stopCalibrationCamera() {
     calibrationCameraActive = false;
     document.getElementById('capture-image').disabled = true;
+    document.getElementById('toggle-auto-capture').disabled = true;
+
+    // Stop auto-capture if running
+    if (autoCaptureEnabled) {
+        stopAutoCapture();
+        const btn = document.getElementById('toggle-auto-capture');
+        btn.textContent = '⏯️ Start Auto-Capture';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-secondary');
+    }
 
     // Disable calibration overlay on server side
     if (calibrationData.camera_id) {
@@ -1775,6 +2051,9 @@ function stopCalibrationCamera() {
             <p class="preview-hint">Start camera to begin capturing</p>
         </div>
     `;
+
+    // Keep coverage map data and display intact - don't reset
+    // Coverage map persists across camera start/stop cycles
 
     // Clean up canvas references
     markerDetectionCanvas = null;
@@ -1811,6 +2090,189 @@ function startPatternDetection() {
             // Silently fail - don't disrupt the UI
         }
     }, 1000); // Check every second (reduced frequency since we're not drawing)
+}
+
+function updateCoverageMap(detection) {
+    if (!coverageMapContext || !coverageMapCanvas) return;
+
+    // Increment capture count
+    captureCount++;
+
+    // Update pose counts from backend classification
+    if (detection.poses && Array.isArray(detection.poses)) {
+        detection.poses.forEach(pose => {
+            if (poseCounts.hasOwnProperty(pose)) {
+                poseCounts[pose]++;
+            }
+        });
+    }
+
+    // Add each marker corner to coverage data
+    if (detection.marker_corners && detection.marker_corners.length > 0) {
+        detection.marker_corners.forEach((corners, markerIndex) => {
+            // Calculate center of this marker
+            let centerX = 0, centerY = 0;
+            corners.forEach(point => {
+                centerX += point[0];
+                centerY += point[1];
+            });
+            centerX /= corners.length;
+            centerY /= corners.length;
+
+            // Add marker position
+            coverageMapData.push({
+                x: centerX,
+                y: centerY,
+                captureNumber: captureCount,
+                markerIndex: markerIndex,
+                totalMarkers: detection.markers_detected,
+                corners: detection.corners_detected,
+                poses: detection.poses || []  // Store backend-provided poses
+            });
+        });
+    }
+
+    // Redraw coverage map
+    drawCoverageMap();
+
+    // Update pose diversity stats
+    updatePoseDiversityStats();
+}
+
+function drawCoverageMap() {
+    if (!coverageMapContext || !coverageMapCanvas) return;
+
+    const ctx = coverageMapContext;
+    const width = coverageMapCanvas.width;
+    const height = coverageMapCanvas.height;
+
+    // Clear canvas
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw grid
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    const gridSize = 50;
+
+    for (let x = 0; x < width; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+    }
+
+    for (let y = 0; y < height; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+    }
+
+    // Count unique captures
+    const uniqueCaptures = captureCount;
+
+    // Draw coverage points (each marker)
+    coverageMapData.forEach((point, index) => {
+        // Color based on quality (more corners = better)
+        const quality = Math.min(1, point.corners / 20);
+        const r = Math.floor(255 * (1 - quality));
+        const g = Math.floor(255 * quality);
+
+        // Draw circle
+        ctx.fillStyle = `rgb(${r}, ${g}, 0)`;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Draw outline
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    });
+
+    // Draw text overlay with pose diversity
+    const overlayHeight = 85;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(5, 5, 210, overlayHeight);
+
+    ctx.fillStyle = '#00ff00';
+    ctx.font = '13px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(`Captures: ${uniqueCaptures}`, 10, 22);
+    ctx.fillText(`Markers: ${coverageMapData.length}`, 10, 38);
+
+    // Calculate pose diversity score
+    const poseTypes = ['center', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight',
+        'topEdge', 'bottomEdge', 'leftEdge', 'rightEdge', 'tilted', 'close', 'far'];
+    const capturedPoses = poseTypes.filter(pose => poseCounts[pose] > 0).length;
+    const diversityPercent = Math.round((capturedPoses / poseTypes.length) * 100);
+
+    ctx.fillStyle = diversityPercent > 70 ? '#00ff00' : diversityPercent > 40 ? '#ffaa00' : '#ff4444';
+    ctx.fillText(`Diversity: ${diversityPercent}%`, 10, 54);
+
+    ctx.fillStyle = '#888';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${capturedPoses}/${poseTypes.length} pose types`, 10, 70);
+    ctx.fillText(`Green = High Quality`, 10, 85);
+}
+
+// Update pose diversity display in UI stats
+function updatePoseDiversityStats() {
+    const statsDiv = document.querySelector('.pose-diversity-stats');
+    if (!statsDiv) return;
+
+    const recommendedCounts = {
+        center: 3,
+        corners: 2,  // Combined count for all 4 corners
+        edges: 2,    // Combined count for all 4 edges
+        tilted: 4,
+        close: 2,
+        far: 2
+    };
+
+    const cornerCount = poseCounts.topLeft + poseCounts.topRight + poseCounts.bottomLeft + poseCounts.bottomRight;
+    const edgeCount = poseCounts.topEdge + poseCounts.bottomEdge + poseCounts.leftEdge + poseCounts.rightEdge;
+
+    const getStatus = (current, recommended) => {
+        if (current >= recommended) return '✅';
+        if (current > 0) return '⚠️';
+        return '❌';
+    };
+
+    statsDiv.innerHTML = `
+        <div class="pose-item">
+            <span>${getStatus(poseCounts.center, recommendedCounts.center)}</span>
+            <span class="pose-label">Center:</span>
+            <span class="pose-count">${poseCounts.center}/${recommendedCounts.center}</span>
+        </div>
+        <div class="pose-item">
+            <span>${getStatus(cornerCount, recommendedCounts.corners * 4)}</span>
+            <span class="pose-label">Corners:</span>
+            <span class="pose-count">${cornerCount}/${recommendedCounts.corners * 4}</span>
+        </div>
+        <div class="pose-item">
+            <span>${getStatus(edgeCount, recommendedCounts.edges * 4)}</span>
+            <span class="pose-label">Edges:</span>
+            <span class="pose-count">${edgeCount}/${recommendedCounts.edges * 4}</span>
+        </div>
+        <div class="pose-item">
+            <span>${getStatus(poseCounts.tilted, recommendedCounts.tilted)}</span>
+            <span class="pose-label">Tilted:</span>
+            <span class="pose-count">${poseCounts.tilted}/${recommendedCounts.tilted}</span>
+        </div>
+        <div class="pose-item">
+            <span>${getStatus(poseCounts.close, recommendedCounts.close)}</span>
+            <span class="pose-label">Close:</span>
+            <span class="pose-count">${poseCounts.close}/${recommendedCounts.close}</span>
+        </div>
+        <div class="pose-item">
+            <span>${getStatus(poseCounts.far, recommendedCounts.far)}</span>
+            <span class="pose-label">Far:</span>
+            <span class="pose-count">${poseCounts.far}/${recommendedCounts.far}</span>
+        </div>
+    `;
 }
 
 function stopPatternDetection() {
@@ -1891,20 +2353,153 @@ function clearMarkerOverlay() {
     }
 }
 
-function captureCalibrationImage() {
-    // Placeholder: In real implementation, this would capture from camera
-    const imageCount = calibrationData.captured_images.length + 1;
-    const imageData = {
-        id: imageCount,
-        timestamp: new Date().toISOString(),
-        thumbnail: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="75"><rect fill="%23ddd" width="100" height="75"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999">' + imageCount + '</text></svg>'
-    };
+// Classify the pose of the calibration board based on its position and characteristics
+// Calculate average movement of markers compared to last capture
+function calculateMarkerMovement(currentMarkers, previousMarkers) {
+    if (!previousMarkers || !currentMarkers) return Infinity;  // No previous capture, allow this one
 
-    calibrationData.captured_images.push(imageData);
+    if (currentMarkers.length !== previousMarkers.length) return Infinity;  // Different marker count, allow
 
-    // Update UI
-    updateCaptureStats();
-    addThumbnail(imageData);
+    let totalMovement = 0;
+    let markerCount = 0;
+
+    // Calculate average movement across all markers
+    for (let i = 0; i < currentMarkers.length; i++) {
+        const current = currentMarkers[i];
+        const previous = previousMarkers[i];
+
+        if (!current || !previous || current.length === 0 || previous.length === 0) continue;
+
+        // Each marker has 4 corners, calculate centroid
+        let currX = 0, currY = 0, prevX = 0, prevY = 0;
+        for (let j = 0; j < current[0].length; j++) {
+            currX += current[0][j][0];
+            currY += current[0][j][1];
+            prevX += previous[0][j][0];
+            prevY += previous[0][j][1];
+        }
+        currX /= current[0].length;
+        currY /= current[0].length;
+        prevX /= previous[0].length;
+        prevY /= previous[0].length;
+
+        // Calculate Euclidean distance
+        const dx = currX - prevX;
+        const dy = currY - prevY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        totalMovement += distance;
+        markerCount++;
+    }
+
+    return markerCount > 0 ? totalMovement / markerCount : 0;
+}
+
+async function captureCalibrationImage(skipMovementCheck = false) {
+    try {
+        // Try to detect pattern multiple times before giving up
+        const maxAttempts = 3;
+        let detection = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const response = await fetch(`${API_BASE}/api/calibration/detect-pattern`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    camera_id: calibrationData.camera_id,
+                    board_config: calibrationData.board
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success && data.detection && data.detection.detected) {
+                detection = data.detection;
+                break;
+            }
+
+            // Wait a bit before retrying (except on last attempt)
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        }
+
+        if (!detection) {
+            // No pattern detected after retries - silently skip
+            console.log('No calibration pattern detected, skipping capture');
+            return;
+        }
+
+        // Check minimum marker count (require at least 10 markers for good calibration)
+        const minMarkers = 10;
+        if (detection.markers_detected < minMarkers) {
+            console.log(`Insufficient markers detected (${detection.markers_detected}/${minMarkers}), skipping capture`);
+            return;
+        }
+
+        // Check if markers have moved significantly from last capture (unless explicitly skipped)
+        if (!skipMovementCheck && lastCaptureMarkers) {
+            const movement = calculateMarkerMovement(detection.marker_corners, lastCaptureMarkers);
+            if (movement < MIN_MARKER_MOVEMENT) {
+                console.log(`Markers haven't moved enough (${movement.toFixed(1)}px < ${MIN_MARKER_MOVEMENT}px), skipping capture`);
+                return;
+            }
+        }
+
+        // Store current markers for next movement check
+        lastCaptureMarkers = detection.marker_corners ? JSON.parse(JSON.stringify(detection.marker_corners)) : null;
+
+        // Update coverage map with this detection
+        if (detection.marker_corners && coverageMapContext) {
+            updateCoverageMap(detection);
+        }
+
+        // Actually capture and save the image
+        const captureResponse = await fetch(`${API_BASE}/api/calibration/capture-image`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                camera_id: calibrationData.camera_id,
+                board_config: calibrationData.board,
+                model: calibrationData.model,
+                target_images: calibrationData.target_images,
+                session_name: calibrationData.session_name  // Will be auto-generated if not set
+            })
+        });
+
+        const captureData = await captureResponse.json();
+
+        if (!captureData.success) {
+            console.error('Failed to save image:', captureData.message);
+            await showAlert('Capture Error', 'Failed to save image: ' + captureData.message);
+            return;
+        }
+
+        // Store session name for subsequent captures
+        if (!calibrationData.session_name && captureData.session_name) {
+            calibrationData.session_name = captureData.session_name;
+        }
+
+        // Create image data entry
+        const imageCount = calibrationData.captured_images.length + 1;
+        const imageData = {
+            id: imageCount,
+            timestamp: new Date().toISOString(),
+            filename: captureData.image_filename,
+            path: captureData.image_path,
+            thumbnail: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="75"><rect fill="%23ddd" width="100" height="75"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999">' + imageCount + '</text></svg>',
+            detection: detection  // Store detection data with image
+        };
+
+        calibrationData.captured_images.push(imageData);
+
+        // Update UI
+        updateCaptureStats();
+
+    } catch (error) {
+        console.error('Error capturing image:', error);
+        // Don't show modal on error, just log it
+    }
 }
 
 function updateCaptureStats() {
@@ -1952,7 +2547,65 @@ async function clearCapturedImages() {
         calibrationData.captured_images = [];
         document.getElementById('capture-thumbnails').innerHTML = '';
         updateCaptureStats();
+
+        // Reset coverage map
+        coverageMapData = [];
+        captureCount = 0;
+        lastCaptureMarkers = null;  // Reset movement tracking
+
+        // Reset pose counts
+        Object.keys(poseCounts).forEach(key => {
+            poseCounts[key] = 0;
+        });
+
+        if (coverageMapContext) {
+            drawCoverageMap();
+        }
+        updatePoseDiversityStats();
     }
+}
+
+function toggleAutoCapture() {
+    const btn = document.getElementById('toggle-auto-capture');
+
+    if (autoCaptureEnabled) {
+        stopAutoCapture();
+        btn.textContent = '⏯️ Start Auto-Capture';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-secondary');
+    } else {
+        startAutoCapture();
+        btn.textContent = '⏹️ Stop Auto-Capture';
+        btn.classList.remove('btn-secondary');
+        btn.classList.add('btn-danger');
+    }
+}
+
+function startAutoCapture() {
+    autoCaptureEnabled = true;
+    const interval = autoCaptureInterval * 1000;  // Convert to milliseconds
+
+    console.log(`Starting auto-capture with ${autoCaptureInterval}s interval`);
+
+    // Attempt capture at set interval
+    autoCaptureTimer = setInterval(async () => {
+        if (!calibrationCameraActive) {
+            stopAutoCapture();
+            return;
+        }
+
+        console.log('Auto-capture: attempting capture...');
+        await captureCalibrationImage(false);  // Don't skip movement check
+    }, interval);
+}
+
+function stopAutoCapture() {
+    autoCaptureEnabled = false;
+    if (autoCaptureTimer) {
+        clearInterval(autoCaptureTimer);
+        autoCaptureTimer = null;
+    }
+    console.log('Auto-capture stopped');
 }
 
 // ============================================================================
