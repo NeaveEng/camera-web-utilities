@@ -249,9 +249,11 @@ class CalibrationPlugin(FeaturePlugin):
         if marker_ids is None or len(marker_corners) == 0:
             return {
                 "detected": False,
+                "markers_detected": 0,
                 "markers_found": 0,
                 "markers_required": self.markers_required,
-                "quality": 0.0
+                "corners_detected": 0,
+                "quality": "No markers detected"
             }
         
         # Interpolate ChArUco corners
@@ -262,17 +264,21 @@ class CalibrationPlugin(FeaturePlugin):
         detected = retval > 0 and len(marker_corners) >= self.markers_required
         quality = len(marker_corners) / self.markers_total if marker_corners is not None else 0.0
         
-        return {
+        result = {
             "detected": detected,
-            "markers_found": len(marker_corners) if marker_corners is not None else 0,
+            "markers_detected": len(marker_corners) if marker_corners is not None else 0,
+            "markers_found": len(marker_corners) if marker_corners is not None else 0,  # Keep for backwards compat
             "markers_required": self.markers_required,
-            "charuco_corners": retval if retval > 0 else 0,
-            "quality": quality,
+            "corners_detected": retval if retval > 0 else 0,
+            "charuco_corners": retval if retval > 0 else 0,  # Keep for backwards compat
+            "quality": f"{quality:.2f}" if quality > 0 else "No pattern",
             "marker_corners": marker_corners,
             "marker_ids": marker_ids,
             "charuco_corners_array": charuco_corners if retval > 0 else None,
             "charuco_ids_array": charuco_ids if retval > 0 else None
         }
+        
+        return result
 
     def capture_calibration_image(self, camera_backend, camera_id: str,
                                   image: Optional[np.ndarray] = None) -> Dict[str, Any]:

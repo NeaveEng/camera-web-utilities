@@ -1727,34 +1727,27 @@ async function startCalibrationCamera() {
             throw new Error(data.message || 'Failed to start camera');
         }
 
-        // Create preview with overlay canvas
+        // Enable calibration overlay on server side
+        await fetch(`${API_BASE}/api/calibration/overlay/${cameraId}/enable`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                board_config: calibrationData.board
+            })
+        });
+
+        // Create simple preview without canvas overlay
         const previewDiv = document.querySelector('.capture-preview');
         previewDiv.innerHTML = `
-            <div style="position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
-                <img id="capture-stream-img" 
-                     src="${API_BASE}/api/cameras/${cameraId}/stream" 
-                     style="max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block;">
-                <canvas id="marker-overlay-canvas" 
-                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;">
-                </canvas>
-            </div>
+            <img id="capture-stream-img" 
+                 src="${API_BASE}/api/cameras/${cameraId}/stream" 
+                 style="max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block;">
         `;
-
-        // Initialize canvas for marker overlay
-        markerDetectionCanvas = document.getElementById('marker-overlay-canvas');
-        markerDetectionContext = markerDetectionCanvas.getContext('2d');
-
-        // Set canvas size to match image
-        const img = document.getElementById('capture-stream-img');
-        img.onload = () => {
-            markerDetectionCanvas.width = img.naturalWidth || 640;
-            markerDetectionCanvas.height = img.naturalHeight || 480;
-        };
 
         calibrationCameraActive = true;
         document.getElementById('capture-image').disabled = false;
 
-        // Start pattern detection with marker overlay
+        // Update pattern status periodically (just for the status text)
         startPatternDetection();
 
     } catch (error) {
@@ -1766,6 +1759,14 @@ async function startCalibrationCamera() {
 function stopCalibrationCamera() {
     calibrationCameraActive = false;
     document.getElementById('capture-image').disabled = true;
+
+    // Disable calibration overlay on server side
+    if (calibrationData.camera_id) {
+        fetch(`${API_BASE}/api/calibration/overlay/${calibrationData.camera_id}/disable`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }).catch(err => console.error('Error disabling overlay:', err));
+    }
 
     const previewDiv = document.querySelector('.capture-preview');
     previewDiv.innerHTML = `
@@ -1783,12 +1784,11 @@ function stopCalibrationCamera() {
 }
 
 function startPatternDetection() {
-    // Call backend API to detect ChArUco pattern and overlay markers
+    // Poll backend API just to update the pattern status text
     calibrationStreamInterval = setInterval(async () => {
         if (!calibrationCameraActive || !calibrationData.camera_id) return;
 
         try {
-            // Get current frame and detect pattern
             const response = await fetch(`${API_BASE}/api/calibration/detect-pattern`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1803,20 +1803,14 @@ function startPatternDetection() {
             if (data.success && data.detection) {
                 const detection = data.detection;
                 document.getElementById('pattern-status').textContent = detection.detected ? '✅ Yes' : '❌ No';
-
-                // Draw marker overlay if detected
-                if (detection.detected && markerDetectionContext && markerDetectionCanvas) {
-                    drawMarkerOverlay(detection);
-                }
             } else {
                 document.getElementById('pattern-status').textContent = '❌ No';
-                clearMarkerOverlay();
             }
         } catch (error) {
             console.error('Pattern detection error:', error);
             // Silently fail - don't disrupt the UI
         }
-    }, 500); // Check every 500ms
+    }, 1000); // Check every second (reduced frequency since we're not drawing)
 }
 
 function stopPatternDetection() {

@@ -60,7 +60,9 @@ class FeatureManager:
                         print(f"Loaded plugin: {plugin_name}")
                         
             except Exception as e:
+                import traceback
                 print(f"Error loading plugin {plugin_file}: {e}")
+                traceback.print_exc()
 
     def list_plugins(self) -> List[Dict[str, Any]]:
         """

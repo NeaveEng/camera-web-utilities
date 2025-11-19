@@ -27,6 +27,10 @@ group_manager = None
 feature_manager = None
 workflow_manager = None
 
+# Calibration overlay state
+calibration_overlay_enabled = {}
+calibration_board_config = {}
+
 
 def initialize():
     """Initialize all backend systems."""
@@ -123,13 +127,97 @@ def stop_camera(camera_id):
 @app.route('/api/cameras/<camera_id>/stream')
 def camera_stream(camera_id):
     """MJPEG stream endpoint for a camera."""
+    import cv2
+    import numpy as np
+    
     def generate():
         """Generate MJPEG stream."""
         while camera_backend.is_streaming(camera_id):
-            frame = camera_backend.get_preview_frame(camera_id)
-            if frame:
+            frame_jpeg = camera_backend.get_preview_frame(camera_id)
+            
+            # If calibration overlay is enabled, decode, draw markers, re-encode
+            if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
+                try:
+                    # Decode JPEG to numpy array
+                    nparr = np.frombuffer(frame_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        # Get calibration plugin
+                        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+                        if calibration_plugin:
+                            # Configure board if needed
+                            board_config = calibration_board_config.get(camera_id, {})
+                            if board_config:
+                                calibration_plugin.configure_board(
+                                    width=board_config.get('width', 8),
+                                    height=board_config.get('height', 5),
+                                    square_length=board_config.get('square_length', 50.0),
+                                    marker_length=board_config.get('marker_length', 37.0),
+                                    dictionary=board_config.get('dictionary', 'DICT_6X6_100')
+                                )
+                            
+                            # Get full resolution frame for detection
+                            full_frame = camera_backend.get_full_frame(camera_id)
+                            if full_frame is not None:
+                                # Detect pattern
+                                detection = calibration_plugin.detect_charuco_pattern(full_frame)
+                                
+                                # Draw markers on preview frame
+                                if detection.get('detected'):
+                                    try:
+                                        # Calculate scale from full frame to preview frame
+                                        scale_x = frame.shape[1] / full_frame.shape[1]
+                                        scale_y = frame.shape[0] / full_frame.shape[0]
+                                        
+                                        # Draw ArUco markers using OpenCV's built-in function
+                                        if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
+                                            marker_corners = detection['marker_corners']
+                                            marker_ids = detection['marker_ids']
+                                            
+                                            # Scale corners to preview size
+                                            scaled_corners = []
+                                            for corners in marker_corners:
+                                                scaled = corners.copy()
+                                                scaled[:, :, 0] *= scale_x
+                                                scaled[:, :, 1] *= scale_y
+                                                scaled_corners.append(scaled)
+                                            
+                                            # Draw detected markers
+                                            cv2.aruco.drawDetectedMarkers(frame, scaled_corners, marker_ids)
+                                        
+                                        # Draw ChArUco corners
+                                        if detection.get('charuco_corners_array') is not None:
+                                            corners = detection['charuco_corners_array']
+                                            # Reshape to ensure it's 2D array of points
+                                            if corners.ndim == 3:
+                                                corners = corners.reshape(-1, 2)
+                                            for corner in corners:
+                                                # Extract x, y and convert to Python scalars
+                                                x = int(corner.flatten()[0] * scale_x)
+                                                y = int(corner.flatten()[1] * scale_y)
+                                                cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
+                                        
+                                        # Draw info overlay
+                                        info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
+                                        cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
+                                        cv2.putText(frame, info_text, (10, 25),
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    except Exception as draw_error:
+                                        import traceback
+                                        print(f"Error drawing calibration overlay: {draw_error}")
+                                        traceback.print_exc()
+                        
+                        # Re-encode to JPEG
+                        _, frame_jpeg = cv2.imencode('.jpg', frame)
+                        frame_jpeg = frame_jpeg.tobytes()
+                except Exception as e:
+                    print(f"Error drawing calibration overlay: {e}")
+                    # Fall through to use original frame
+            
+            if frame_jpeg:
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
             time.sleep(0.033)  # ~30 FPS
     
     return Response(generate(),
@@ -700,6 +788,50 @@ def delete_sensor_config(sensor):
 # Calibration API Endpoints
 # ============================================================================
 
+@app.route('/api/calibration/overlay/<camera_id>/enable', methods=['POST'])
+def enable_calibration_overlay(camera_id):
+    """Enable calibration marker overlay on camera stream."""
+    try:
+        global calibration_overlay_enabled, calibration_board_config
+        
+        data = request.json or {}
+        board_config = data.get('board_config', {})
+        
+        calibration_overlay_enabled[camera_id] = True
+        calibration_board_config[camera_id] = board_config
+        
+        return jsonify({
+            'success': True,
+            'message': f'Calibration overlay enabled for camera {camera_id}'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/calibration/overlay/<camera_id>/disable', methods=['POST'])
+def disable_calibration_overlay(camera_id):
+    """Disable calibration marker overlay on camera stream."""
+    try:
+        global calibration_overlay_enabled, calibration_board_config
+        
+        calibration_overlay_enabled[camera_id] = False
+        if camera_id in calibration_board_config:
+            del calibration_board_config[camera_id]
+        
+        return jsonify({
+            'success': True,
+            'message': f'Calibration overlay disabled for camera {camera_id}'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
 @app.route('/api/calibration/detect-pattern', methods=['POST'])
 def detect_calibration_pattern():
     """Detect ChArUco pattern in current camera frame."""
@@ -715,7 +847,7 @@ def detect_calibration_pattern():
             }), 400
         
         # Get calibration plugin
-        calibration_plugin = feature_manager.get_plugin('calibration')
+        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
         if not calibration_plugin:
             return jsonify({
                 'success': False,
@@ -735,10 +867,18 @@ def detect_calibration_pattern():
         # Get current frame from camera
         frame = camera_backend.get_full_frame(camera_id)
         if frame is None:
-            return jsonify({
-                'success': False,
-                'message': 'Failed to get frame from camera. Is the camera streaming?'
-            }), 500
+            # Try to get the camera info and ensure it's active
+            camera_info = camera_backend.get_camera(camera_id)
+            if camera_info and camera_info.get('active'):
+                return jsonify({
+                    'success': False,
+                    'message': f'Camera {camera_id} is active but failed to get frame. Check camera connection.'
+                }), 500
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Camera {camera_id} is not streaming. Please start the camera preview first.'
+                }), 400
         
         # Detect pattern
         detection = calibration_plugin.detect_charuco_pattern(frame)
@@ -769,8 +909,10 @@ def detect_calibration_pattern():
             response_data['detection']['marker_ids'] = detection['marker_ids'].flatten().tolist()
         
         # Add ChArUco corners if detected
-        if detection.get('charuco_corners') is not None:
-            response_data['detection']['charuco_corners'] = detection['charuco_corners'].reshape(-1, 2).tolist()
+        if detection.get('charuco_corners_array') is not None:
+            corners = detection['charuco_corners_array']
+            if corners is not None and len(corners) > 0:
+                response_data['detection']['charuco_corners'] = corners.reshape(-1, 2).tolist()
         
         return jsonify(response_data)
         
