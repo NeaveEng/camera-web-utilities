@@ -1357,11 +1357,13 @@ function openCalibrationWizard() {
     currentWizardStep = 1;
     calibrationData = {
         camera_id: null,
-        pattern: {
-            type: 'checkerboard',
-            width: 9,
-            height: 6,
-            square_size: 25
+        model: 'pinhole',
+        board: {
+            width: 8,
+            height: 5,
+            square_length: 50,
+            marker_length: 37,
+            dictionary: 'DICT_6X6_100'
         },
         target_images: 20,
         captured_images: [],
@@ -1463,14 +1465,16 @@ async function validateWizardStep(stepNumber) {
             }
             calibrationData.camera_id = cameraId;
 
-            // Update pattern data
-            calibrationData.pattern.type = document.getElementById('pattern-type').value;
-            calibrationData.pattern.width = parseInt(document.getElementById('pattern-width').value);
-            calibrationData.pattern.height = parseInt(document.getElementById('pattern-height').value);
-            calibrationData.pattern.square_size = parseFloat(document.getElementById('square-size').value);
-            calibrationData.target_images = parseInt(document.getElementById('target-images').value);
+            // Update calibration model
+            calibrationData.model = document.getElementById('calibration-model').value;
 
-            // Update target display in capture step
+            // Update ChArUco board configuration
+            calibrationData.board.width = parseInt(document.getElementById('board-width').value);
+            calibrationData.board.height = parseInt(document.getElementById('board-height').value);
+            calibrationData.board.square_length = parseFloat(document.getElementById('square-length').value);
+            calibrationData.board.marker_length = parseFloat(document.getElementById('marker-length').value);
+            calibrationData.board.dictionary = document.getElementById('aruco-dictionary').value;
+            calibrationData.target_images = parseInt(document.getElementById('target-images').value);            // Update target display in capture step
             document.getElementById('images-target').textContent = calibrationData.target_images;
 
             return true;
@@ -1497,23 +1501,153 @@ async function validateWizardStep(stepNumber) {
 // ============================================================================
 
 function setupSetupStepListeners() {
-    // Update pattern display when values change
-    const patternInputs = ['pattern-type', 'pattern-width', 'pattern-height', 'square-size'];
-    patternInputs.forEach(id => {
+    // Camera selection change handler
+    const cameraSelect = document.getElementById('calibration-camera-select');
+    if (cameraSelect) {
+        cameraSelect.addEventListener('change', async (e) => {
+            await updateSetupCameraPreview(e.target.value);
+        });
+    }
+
+    // Board preset selector
+    const boardPreset = document.getElementById('board-preset');
+    if (boardPreset) {
+        boardPreset.addEventListener('change', (e) => {
+            applyBoardPreset(e.target.value);
+        });
+    }
+
+    // ArUco dictionary selector
+    const dictionarySelect = document.getElementById('aruco-dictionary');
+    if (dictionarySelect) {
+        dictionarySelect.addEventListener('change', updateBoardInfo);
+    }
+
+    // Board configuration inputs
+    const boardInputs = ['board-width', 'board-height', 'square-length', 'marker-length'];
+    boardInputs.forEach(id => {
         const element = document.getElementById(id);
         if (element) {
-            element.addEventListener('change', updatePatternPreview);
+            element.addEventListener('input', updateBoardInfo);
         }
     });
+
+    // Generate board button
+    const generateBtn = document.getElementById('generate-board-btn');
+    if (generateBtn) {
+        generateBtn.addEventListener('click', generateCharucoBoard);
+    }
+
+    // Initialize board info
+    updateBoardInfo();
 }
 
-function updatePatternPreview() {
-    // Placeholder for future pattern visualization
-    console.log('Pattern updated:', {
-        type: document.getElementById('pattern-type').value,
-        width: document.getElementById('pattern-width').value,
-        height: document.getElementById('pattern-height').value
-    });
+function applyBoardPreset(preset) {
+    const presets = {
+        'default': { width: 8, height: 5, square_length: 50, marker_length: 37 },
+        'large': { width: 10, height: 7, square_length: 75, marker_length: 56 },
+        'small': { width: 6, height: 4, square_length: 30, marker_length: 22 }
+    };
+
+    if (preset && presets[preset]) {
+        const config = presets[preset];
+        document.getElementById('board-width').value = config.width;
+        document.getElementById('board-height').value = config.height;
+        document.getElementById('square-length').value = config.square_length;
+        document.getElementById('marker-length').value = config.marker_length;
+        updateBoardInfo();
+    }
+}
+
+function updateBoardInfo() {
+    const width = parseInt(document.getElementById('board-width').value) || 8;
+    const height = parseInt(document.getElementById('board-height').value) || 5;
+    const dictionary = document.getElementById('aruco-dictionary').value;
+
+    const markersTotal = Math.floor((width * height) / 2);
+    const markersRequired = Math.floor(markersTotal * 0.9);
+
+    document.getElementById('board-markers-total').textContent = markersTotal;
+    document.getElementById('board-markers-required').textContent = markersRequired;
+    document.getElementById('board-dictionary-display').textContent = dictionary;
+}
+
+function generateCharucoBoard() {
+    const width = parseInt(document.getElementById('board-width').value);
+    const height = parseInt(document.getElementById('board-height').value);
+    const squareLength = parseFloat(document.getElementById('square-length').value);
+    const markerLength = parseFloat(document.getElementById('marker-length').value);
+    const dictionary = document.getElementById('aruco-dictionary').value;
+
+    // Placeholder: In real implementation, this would call backend to generate board image
+    showAlert(
+        'Generate Board',
+        `Board configuration:\n• Size: ${width}×${height} markers\n• Square: ${squareLength}mm\n• Marker: ${markerLength}mm\n• Dictionary: ${dictionary}\n\nBoard generation will be implemented with backend integration.`
+    );
+}
+
+async function updateSetupCameraPreview(cameraId) {
+    const previewImg = document.getElementById('setup-camera-preview');
+    const placeholder = document.getElementById('setup-preview-placeholder');
+    const cameraName = document.getElementById('setup-camera-name');
+
+    if (!cameraId) {
+        // No camera selected
+        previewImg.style.display = 'none';
+        placeholder.style.display = 'flex';
+        cameraName.textContent = 'No camera selected';
+        return;
+    }
+
+    // Find camera info
+    const camera = cameras.find(c => c.id == cameraId);
+    if (!camera) {
+        placeholder.style.display = 'flex';
+        previewImg.style.display = 'none';
+        cameraName.textContent = 'Camera not found';
+        return;
+    }
+
+    // Update camera name
+    cameraName.textContent = `Camera ${cameraId} - ${camera.name}`;
+
+    // Check if camera is already streaming
+    if (camera.streaming) {
+        // Camera already streaming, show preview
+        previewImg.src = `${API_BASE}/api/cameras/${cameraId}/stream?t=${Date.now()}`;
+        previewImg.style.display = 'block';
+        placeholder.style.display = 'none';
+    } else {
+        // Need to start camera
+        try {
+            const response = await fetch(`${API_BASE}/api/cameras/${cameraId}/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                // Camera started, show preview
+                previewImg.src = `${API_BASE}/api/cameras/${cameraId}/stream?t=${Date.now()}`;
+                previewImg.style.display = 'block';
+                placeholder.style.display = 'none';
+
+                // Update camera list state
+                camera.streaming = true;
+            } else {
+                throw new Error(data.message || 'Failed to start camera');
+            }
+        } catch (error) {
+            console.error('Error starting camera preview:', error);
+            placeholder.innerHTML = `
+                <p style="color: #f44336;">⚠️ Camera Error</p>
+                <p class="preview-hint">${error.message}</p>
+            `;
+            placeholder.style.display = 'flex';
+            previewImg.style.display = 'none';
+        }
+    }
 }
 
 // ============================================================================

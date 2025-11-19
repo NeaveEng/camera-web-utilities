@@ -542,8 +542,10 @@ header h1 {
 /* ========================================================================== */
 
 .calibration-modal-content {
-    max-width: 1000px;
-    max-height: 90vh;
+    max-width: 95vw;
+    width: 95vw;
+    max-height: 95vh;
+    height: 95vh;
     overflow-y: auto;
 }
 
@@ -701,6 +703,81 @@ header h1 {
     margin-top: 5px;
     color: #999;
     font-size: 0.85em;
+}
+
+/* Setup Layout with Preview */
+.setup-layout {
+    display: grid;
+    grid-template-columns: 400px 1fr;
+    gap: 25px;
+    margin-bottom: 25px;
+}
+
+.setup-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.preview-container {
+    background: #f5f5f5;
+    border-radius: 8px;
+    overflow: hidden;
+    aspect-ratio: 4/3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid #e0e0e0;
+}
+
+.preview-info {
+    background: #667eea;
+    color: white;
+    padding: 8px 12px;
+    border-radius: 6px;
+    text-align: center;
+    font-weight: 500;
+    font-size: 0.9em;
+}
+
+.setup-config {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+
+@media (max-width: 1100px) {
+    .setup-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .setup-preview {
+        order: -1;
+    }
+}
+
+/* Board Configuration Section */
+.board-config-section {
+    background: #f9f9f9;
+    padding: 20px;
+    border-radius: 8px;
+    margin-top: 20px;
+    border: 1px solid #e0e0e0;
+}
+
+.board-config-section h4 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.board-config-section h4::before {
+    content: '📐';
+    font-size: 1.2em;
+}
+
+.board-info {
+    font-family: 'Courier New', monospace;
 }
 
 /* Calibration Capture Area */
