@@ -1224,3 +1224,635 @@ async function saveSensorConfig() {
 // Add event listener for sensor config button
 document.getElementById('sensor-config-btn').addEventListener('click', openSensorConfig);
 
+// ============================================================================
+// CUSTOM DIALOG UTILITIES
+// ============================================================================
+
+function showConfirm(title, message) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('confirm-dialog');
+        const titleEl = document.getElementById('confirm-title');
+        const messageEl = document.getElementById('confirm-message');
+        const cancelBtn = document.getElementById('confirm-cancel');
+        const okBtn = document.getElementById('confirm-ok');
+
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        modal.classList.add('show');
+
+        const cleanup = () => {
+            modal.classList.remove('show');
+            cancelBtn.onclick = null;
+            okBtn.onclick = null;
+        };
+
+        cancelBtn.onclick = () => {
+            cleanup();
+            resolve(false);
+        };
+
+        okBtn.onclick = () => {
+            cleanup();
+            resolve(true);
+        };
+
+        // Close on click outside
+        modal.onclick = (e) => {
+            if (e.target === modal) {
+                cleanup();
+                resolve(false);
+            }
+        };
+    });
+}
+
+function showAlert(title, message) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById('alert-dialog');
+        const titleEl = document.getElementById('alert-title');
+        const messageEl = document.getElementById('alert-message');
+        const okBtn = document.getElementById('alert-ok');
+
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        modal.classList.add('show');
+
+        const cleanup = () => {
+            modal.classList.remove('show');
+            okBtn.onclick = null;
+        };
+
+        okBtn.onclick = () => {
+            cleanup();
+            resolve(true);
+        };
+
+        // Close on click outside
+        modal.onclick = (e) => {
+            if (e.target === modal) {
+                cleanup();
+                resolve(true);
+            }
+        };
+    });
+}
+
+// ============================================================================
+// CALIBRATION WIZARD
+// ============================================================================
+
+let currentWizardStep = 1;
+let calibrationData = {
+    camera_id: null,
+    pattern: {
+        type: 'checkerboard',
+        width: 9,
+        height: 6,
+        square_size: 25
+    },
+    target_images: 20,
+    captured_images: [],
+    results: null
+};
+
+// Initialize calibration wizard
+function initializeCalibrationWizard() {
+    const calibrationBtn = document.getElementById('calibration-btn');
+    const calibrationModal = document.getElementById('calibration-modal');
+    const closeBtn = calibrationModal.querySelector('.close');
+    const wizardCancel = document.getElementById('wizard-cancel');
+
+    // Open modal
+    calibrationBtn.addEventListener('click', () => {
+        openCalibrationWizard();
+    });
+
+    // Close modal
+    closeBtn.addEventListener('click', () => {
+        closeCalibrationWizard();
+    });
+
+    wizardCancel.addEventListener('click', async () => {
+        const confirmed = await showConfirm(
+            'Cancel Calibration',
+            'Are you sure you want to cancel calibration? All progress will be lost.'
+        );
+        if (confirmed) {
+            closeCalibrationWizard();
+        }
+    });
+
+    // Setup step event listeners
+    setupSetupStepListeners();
+    setupCaptureStepListeners();
+    setupCalibrationStepListeners();
+    setupReviewStepListeners();
+}
+
+function openCalibrationWizard() {
+    const modal = document.getElementById('calibration-modal');
+    modal.classList.add('show');
+
+    // Reset wizard state
+    currentWizardStep = 1;
+    calibrationData = {
+        camera_id: null,
+        pattern: {
+            type: 'checkerboard',
+            width: 9,
+            height: 6,
+            square_size: 25
+        },
+        target_images: 20,
+        captured_images: [],
+        results: null
+    };
+
+    // Populate camera selector
+    populateCalibrationCameraSelect();
+
+    // Show first step
+    showWizardStep(1);
+}
+
+function closeCalibrationWizard() {
+    const modal = document.getElementById('calibration-modal');
+    modal.classList.remove('show');
+
+    // Clean up any active camera streams
+    stopCalibrationCamera();
+}
+
+function populateCalibrationCameraSelect() {
+    const select = document.getElementById('calibration-camera-select');
+    select.innerHTML = '<option value="">Choose a camera...</option>';
+
+    cameras.forEach(camera => {
+        const option = document.createElement('option');
+        option.value = camera.id;
+        option.textContent = `Camera ${camera.id} - ${camera.name}`;
+        select.appendChild(option);
+    });
+}
+
+function navigateWizard(direction) {
+    const targetStep = currentWizardStep + direction;
+
+    if (targetStep < 1 || targetStep > 4) return;
+
+    // Validate current step before moving forward
+    if (direction > 0) {
+        validateWizardStep(currentWizardStep).then(isValid => {
+            if (isValid) {
+                showWizardStep(targetStep);
+            }
+        });
+    } else {
+        showWizardStep(targetStep);
+    }
+}
+
+function showWizardStep(stepNumber) {
+    currentWizardStep = stepNumber;
+
+    // Update progress indicator
+    document.querySelectorAll('.wizard-step').forEach((step, index) => {
+        const stepNum = index + 1;
+        step.classList.remove('active', 'completed');
+
+        if (stepNum < currentWizardStep) {
+            step.classList.add('completed');
+        } else if (stepNum === currentWizardStep) {
+            step.classList.add('active');
+        }
+    });
+
+    // Update panels
+    document.querySelectorAll('.wizard-panel').forEach((panel, index) => {
+        panel.classList.remove('active');
+        if (index + 1 === currentWizardStep) {
+            panel.classList.add('active');
+        }
+    });
+
+    // Update navigation buttons
+    const prevBtn = document.getElementById('wizard-prev');
+    const nextBtn = document.getElementById('wizard-next');
+
+    prevBtn.disabled = currentWizardStep === 1;
+    prevBtn.onclick = () => navigateWizard(-1);
+
+    if (currentWizardStep === 4) {
+        nextBtn.textContent = 'Finish';
+        nextBtn.onclick = finishCalibration;
+        // Update review panel when entering step 4
+        updateReviewPanel();
+    } else {
+        nextBtn.textContent = 'Next →';
+        nextBtn.onclick = () => navigateWizard(1);
+    }
+}
+
+async function validateWizardStep(stepNumber) {
+    switch (stepNumber) {
+        case 1: // Setup
+            const cameraId = document.getElementById('calibration-camera-select').value;
+            if (!cameraId) {
+                await showAlert('Camera Required', 'Please select a camera to continue.');
+                return false;
+            }
+            calibrationData.camera_id = cameraId;
+
+            // Update pattern data
+            calibrationData.pattern.type = document.getElementById('pattern-type').value;
+            calibrationData.pattern.width = parseInt(document.getElementById('pattern-width').value);
+            calibrationData.pattern.height = parseInt(document.getElementById('pattern-height').value);
+            calibrationData.pattern.square_size = parseFloat(document.getElementById('square-size').value);
+            calibrationData.target_images = parseInt(document.getElementById('target-images').value);
+
+            // Update target display in capture step
+            document.getElementById('images-target').textContent = calibrationData.target_images;
+
+            return true;
+
+        case 2: // Capture
+            // Allow proceeding to calibration step
+            return true;
+
+        case 3: // Calibration
+            // Check if calibration has been run
+            if (!calibrationData.results) {
+                await showAlert('Calibration Required', 'Please run the calibration before proceeding to review.');
+                return false;
+            }
+            return true;
+
+        default:
+            return true;
+    }
+}
+
+// ============================================================================
+// Step 1: Setup
+// ============================================================================
+
+function setupSetupStepListeners() {
+    // Update pattern display when values change
+    const patternInputs = ['pattern-type', 'pattern-width', 'pattern-height', 'square-size'];
+    patternInputs.forEach(id => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.addEventListener('change', updatePatternPreview);
+        }
+    });
+}
+
+function updatePatternPreview() {
+    // Placeholder for future pattern visualization
+    console.log('Pattern updated:', {
+        type: document.getElementById('pattern-type').value,
+        width: document.getElementById('pattern-width').value,
+        height: document.getElementById('pattern-height').value
+    });
+}
+
+// ============================================================================
+// Step 2: Capture
+// ============================================================================
+
+let calibrationCameraActive = false;
+let calibrationStreamInterval = null;
+
+function setupCaptureStepListeners() {
+    document.getElementById('start-capture').addEventListener('click', toggleCalibrationCamera);
+    document.getElementById('capture-image').addEventListener('click', captureCalibrationImage);
+    document.getElementById('clear-captures').addEventListener('click', clearCapturedImages);
+}
+
+async function toggleCalibrationCamera() {
+    const btn = document.getElementById('start-capture');
+
+    if (calibrationCameraActive) {
+        stopCalibrationCamera();
+        btn.textContent = '▶️ Start Camera';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-primary');
+    } else {
+        await startCalibrationCamera();
+        btn.textContent = '⏹️ Stop Camera';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+    }
+}
+
+async function startCalibrationCamera() {
+    try {
+        // Start the camera if not already started
+        const cameraId = calibrationData.camera_id;
+        const response = await fetch(`${API_BASE}/api/cameras/${cameraId}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.message || 'Failed to start camera');
+        }
+
+        // Show preview stream
+        const previewDiv = document.querySelector('.capture-preview');
+        previewDiv.innerHTML = `<img src="${API_BASE}/api/cameras/${cameraId}/stream" 
+                                     style="width: 100%; height: 100%; object-fit: contain;">`;
+
+        calibrationCameraActive = true;
+        document.getElementById('capture-image').disabled = false;
+
+        // Start pattern detection simulation (placeholder)
+        startPatternDetection();
+
+    } catch (error) {
+        console.error('Error starting calibration camera:', error);
+        await showAlert('Camera Error', 'Failed to start camera: ' + error.message);
+    }
+}
+
+function stopCalibrationCamera() {
+    calibrationCameraActive = false;
+    document.getElementById('capture-image').disabled = true;
+
+    const previewDiv = document.querySelector('.capture-preview');
+    previewDiv.innerHTML = `
+        <div class="preview-placeholder">
+            <p>📷 Camera preview will appear here</p>
+            <p class="preview-hint">Start camera to begin capturing</p>
+        </div>
+    `;
+
+    stopPatternDetection();
+}
+
+function startPatternDetection() {
+    // Placeholder: Simulate pattern detection
+    // In real implementation, this would call backend API to detect pattern
+    calibrationStreamInterval = setInterval(() => {
+        const detected = Math.random() > 0.5; // Random detection
+        document.getElementById('pattern-status').textContent = detected ? '✅ Yes' : '❌ No';
+    }, 1000);
+}
+
+function stopPatternDetection() {
+    if (calibrationStreamInterval) {
+        clearInterval(calibrationStreamInterval);
+        calibrationStreamInterval = null;
+    }
+    document.getElementById('pattern-status').textContent = '❌ No';
+}
+
+function captureCalibrationImage() {
+    // Placeholder: In real implementation, this would capture from camera
+    const imageCount = calibrationData.captured_images.length + 1;
+    const imageData = {
+        id: imageCount,
+        timestamp: new Date().toISOString(),
+        thumbnail: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="75"><rect fill="%23ddd" width="100" height="75"/><text x="50%" y="50%" text-anchor="middle" dy=".3em" fill="%23999">' + imageCount + '</text></svg>'
+    };
+
+    calibrationData.captured_images.push(imageData);
+
+    // Update UI
+    updateCaptureStats();
+    addThumbnail(imageData);
+}
+
+function updateCaptureStats() {
+    const count = calibrationData.captured_images.length;
+    const target = calibrationData.target_images;
+
+    document.getElementById('images-captured').textContent = count;
+
+    const coverage = Math.min((count / target) * 100, 100);
+    document.getElementById('coverage-progress').style.width = coverage + '%';
+    document.getElementById('coverage-percent').textContent = Math.round(coverage) + '%';
+}
+
+function addThumbnail(imageData) {
+    const gallery = document.getElementById('capture-thumbnails');
+
+    const thumb = document.createElement('div');
+    thumb.className = 'thumbnail-item';
+    thumb.dataset.id = imageData.id;
+    thumb.innerHTML = `
+        <img src="${imageData.thumbnail}" alt="Capture ${imageData.id}">
+        <button class="thumbnail-remove" onclick="removeThumbnail(${imageData.id})">×</button>
+    `;
+
+    gallery.appendChild(thumb);
+}
+
+function removeThumbnail(imageId) {
+    calibrationData.captured_images = calibrationData.captured_images.filter(img => img.id !== imageId);
+
+    const thumb = document.querySelector(`.thumbnail-item[data-id="${imageId}"]`);
+    if (thumb) thumb.remove();
+
+    updateCaptureStats();
+}
+
+async function clearCapturedImages() {
+    if (calibrationData.captured_images.length === 0) return;
+
+    const confirmed = await showConfirm(
+        'Clear Images',
+        'Are you sure you want to clear all captured images?'
+    );
+    if (confirmed) {
+        calibrationData.captured_images = [];
+        document.getElementById('capture-thumbnails').innerHTML = '';
+        updateCaptureStats();
+    }
+}
+
+// ============================================================================
+// Step 3: Calibration
+// ============================================================================
+
+function setupCalibrationStepListeners() {
+    document.getElementById('run-calibration').addEventListener('click', runCalibration);
+}
+
+async function runCalibration() {
+    const btn = document.getElementById('run-calibration');
+    btn.disabled = true;
+    btn.textContent = '⏳ Calibrating...';
+
+    // Update status
+    updateCalibrationStatus('⏳', 'Processing Images', 'Analyzing calibration pattern...');
+
+    // Simulate calibration progress
+    await simulateCalibrationProgress();
+
+    // Simulate results
+    calibrationData.results = {
+        reprojection_error: (Math.random() * 0.5 + 0.2).toFixed(3),
+        images_used: calibrationData.captured_images.length,
+        camera_matrix: [
+            [1000.5, 0, 640.2],
+            [0, 1000.8, 360.5],
+            [0, 0, 1]
+        ],
+        distortion_coeffs: [
+            -0.12, 0.08, -0.001, 0.002, -0.03
+        ]
+    };
+
+    updateCalibrationStatus('✅', 'Calibration Complete', 'Successfully calibrated camera');
+    addCalibrationLog('Calibration completed successfully', 'success');
+
+    btn.disabled = false;
+    btn.textContent = '✓ Calibration Complete';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-success');
+}
+
+async function simulateCalibrationProgress() {
+    const progressBar = document.getElementById('calibration-progress');
+    const progressLabel = document.getElementById('calibration-progress-label');
+
+    const steps = [
+        { percent: 20, message: 'Loading images...' },
+        { percent: 40, message: 'Detecting calibration patterns...' },
+        { percent: 60, message: 'Computing camera parameters...' },
+        { percent: 80, message: 'Refining calibration...' },
+        { percent: 100, message: 'Finalizing results...' }
+    ];
+
+    for (const step of steps) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        progressBar.style.width = step.percent + '%';
+        progressLabel.textContent = step.percent + '%';
+        addCalibrationLog(step.message);
+    }
+}
+
+function updateCalibrationStatus(icon, title, detail) {
+    document.getElementById('calibration-status-icon').textContent = icon;
+    document.getElementById('calibration-status-text').textContent = title;
+    document.getElementById('calibration-status-detail').textContent = detail;
+}
+
+function addCalibrationLog(message, type = '') {
+    const log = document.getElementById('calibration-log');
+    const entry = document.createElement('div');
+    entry.className = 'log-entry' + (type ? ' ' + type : '');
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+}
+
+// ============================================================================
+// Step 4: Review
+// ============================================================================
+
+function setupReviewStepListeners() {
+    document.getElementById('save-calibration').addEventListener('click', saveCalibration);
+    document.getElementById('export-calibration').addEventListener('click', exportCalibration);
+    document.getElementById('recalibrate').addEventListener('click', recalibrate);
+}
+
+// Update review panel when entering step 4
+function updateReviewPanel() {
+    if (!calibrationData.results) return;
+
+    const results = calibrationData.results;
+
+    // Update metrics
+    document.getElementById('result-error').textContent = results.reprojection_error;
+    document.getElementById('result-images').textContent = results.images_used;
+
+    const quality = results.reprojection_error < 0.5 ? 'Excellent' :
+        results.reprojection_error < 1.0 ? 'Good' : 'Fair';
+    document.getElementById('result-quality').textContent = quality;
+
+    // Update camera matrix
+    const matrixHTML = results.camera_matrix
+        .map(row => row.map(v => v.toFixed(2).padStart(8)).join('  '))
+        .join('\n');
+    document.getElementById('camera-matrix').innerHTML = `<code>${matrixHTML}</code>`;
+
+    // Update distortion coefficients
+    const distHTML = results.distortion_coeffs
+        .map(v => v.toFixed(4).padStart(8))
+        .join('\n');
+    document.getElementById('distortion-coeffs').innerHTML = `<code>${distHTML}</code>`;
+
+    // Set default calibration name
+    const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    document.getElementById('calibration-name').value =
+        `camera_${calibrationData.camera_id}_${timestamp}`;
+}
+
+async function saveCalibration() {
+    const name = document.getElementById('calibration-name').value;
+    if (!name) {
+        await showAlert('Name Required', 'Please enter a calibration name.');
+        return;
+    }
+
+    const saveImages = document.getElementById('save-images').checked;
+    const applyImmediately = document.getElementById('apply-immediately').checked;
+
+    // Placeholder: In real implementation, this would call backend API
+    console.log('Saving calibration:', {
+        name,
+        camera_id: calibrationData.camera_id,
+        results: calibrationData.results,
+        save_images: saveImages,
+        apply_immediately: applyImmediately
+    });
+
+    await showAlert('Success', 'Calibration saved successfully!');
+    closeCalibrationWizard();
+}
+
+function exportCalibration() {
+    // Placeholder: Export calibration data as JSON
+    const exportData = {
+        camera_id: calibrationData.camera_id,
+        pattern: calibrationData.pattern,
+        results: calibrationData.results,
+        timestamp: new Date().toISOString()
+    };
+
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(dataBlob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `calibration_camera_${calibrationData.camera_id}_${Date.now()}.json`;
+    link.click();
+
+    URL.revokeObjectURL(url);
+}
+
+async function recalibrate() {
+    const confirmed = await showConfirm(
+        'Recalibrate',
+        'Return to capture step to recalibrate? Current results will be discarded.'
+    );
+    if (confirmed) {
+        showWizardStep(2);
+    }
+}
+
+function finishCalibration() {
+    closeCalibrationWizard();
+}
+
+// Initialize calibration wizard when DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    // Wait a bit to ensure other initialization is complete
+    setTimeout(initializeCalibrationWizard, 100);
+});
+

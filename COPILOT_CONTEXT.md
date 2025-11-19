@@ -1,20 +1,23 @@
 # GitHub Copilot Context - Camera Streaming Platform
 
-**Last Updated:** 14 November 2025  
-**Platform:** Jetson Orin Nano with 2x IMX219 CSI cameras  
+**Last Updated:** 19 November 2025  
+**Primary Platform:** NVIDIA Jetson Orin Nano (platform-agnostic design)  
+**Cameras:** 2x IMX477 CSI cameras (supports multiple camera models)  
 **Status:** Fully functional dual-camera streaming system with web interface
 
 ---
 
 ## Project Overview
 
-A Flask-based camera streaming platform for NVIDIA Jetson with dual CSI cameras. Features real-time MJPEG streaming, hardware-accelerated processing via GStreamer, and a responsive web UI for camera control.
+A platform-agnostic Flask-based camera streaming platform designed for multiple hardware platforms and camera types. Currently developed and tested on NVIDIA Jetson with CSI cameras. Features real-time MJPEG streaming, hardware-accelerated processing via GStreamer, and a responsive web UI for camera control.
 
 ### Key Architecture
-- **Backend:** Python/Flask with GStreamer (nvarguscamerasrc)
+- **Backend:** Python/Flask with GStreamer (platform-specific backends)
 - **Frontend:** Vanilla HTML/CSS/JavaScript
 - **Streaming:** Dual-stream architecture (full-res + preview JPEG)
-- **Hardware:** 2x IMX219 cameras (1920x1080@60fps capable)
+- **Platform Design:** Abstracted camera backends via factory pattern
+- **Current Hardware:** NVIDIA Jetson Orin Nano with 2x IMX477 CSI cameras
+- **Supported Cameras:** IMX477 (12MP), IMX219 (8MP), and expandable to other models
 
 ---
 
@@ -22,14 +25,20 @@ A Flask-based camera streaming platform for NVIDIA Jetson with dual CSI cameras.
 
 ### ✅ Completed Features
 
-#### Camera Backend (`backend/camera/jetson.py`)
+#### Camera Backend (`backend/camera/`)
+- **Platform abstraction:** Factory pattern with base class and platform-specific implementations
+  - `base.py`: Abstract camera interface
+  - `factory.py`: Platform detection and backend selection
+  - `jetson.py`: NVIDIA Jetson implementation (nvarguscamerasrc)
+  - `webcam.py`, `raspberry_pi.py`, `luxonis.py`: Additional platform support
 - **Dual-stream GStreamer pipeline:**
   - Full-res branch: 1920x1080 BGR for processing
   - Preview branch: Configurable JPEG stream (default 640x480)
 - **Dynamic controls:** Brightness (EV compensation), gain (ISP digital), rotation, white balance, saturation, edge enhancement, noise reduction
-- **Settings persistence:** Per-camera JSON files in `backend/camera/settings/jetson/`
+- **Settings persistence:** Per-camera JSON files in `backend/camera/settings/{platform}/`
 - **Auto-load/save:** Settings automatically restored on startup and saved on change
 - **Resolution switching:** Stream resolution can be changed dynamically (auto-restarts camera)
+- **Camera compatibility:** IMX477 (12MP, 4056x3040), IMX219 (8MP, 3280x2464), and other CSI/USB cameras
 
 #### Web Interface (`frontend/`)
 - **Dual-camera slots:** Side-by-side video display
@@ -83,19 +92,29 @@ nvarguscamerasrc → tee → [full-res: nvvidconv→videoconvert→BGR→appsink
 backend/
   ├── app.py                 # Flask API server
   ├── camera/
-  │   ├── jetson.py          # Jetson camera backend (613 lines)
-  │   ├── base.py            # Abstract base class
-  │   ├── factory.py         # Platform detection
-  │   ├── groups.py          # Camera grouping
-  │   ├── profiles/jetson/   # Control presets (indoor, outdoor, low_light)
-  │   └── settings/jetson/   # Per-camera persistent settings
+  │   ├── base.py            # Abstract base class for all camera backends
+  │   ├── factory.py         # Platform detection and backend instantiation
+  │   ├── jetson.py          # Jetson camera backend (nvarguscamerasrc)
+  │   ├── webcam.py          # USB webcam backend
+  │   ├── raspberry_pi.py    # Raspberry Pi camera backend
+  │   ├── luxonis.py         # Luxonis OAK camera backend
+  │   ├── groups.py          # Camera grouping and synchronization
+  │   ├── profiles/{platform}/   # Platform-specific control presets
+  │   ├── settings/{platform}/   # Per-camera persistent settings by platform
+  │   └── sensor_configs/    # Camera sensor configurations
   ├── features/              # Plugin framework for image processing
+  │   ├── base.py            # Base feature class
+  │   ├── manager.py         # Feature plugin management
+  │   └── plugins/           # Feature implementations (calibration, etc.)
   └── workflows/             # Multi-camera workflow system
+      ├── base.py            # Base workflow class
+      ├── manager.py         # Workflow management
+      └── templates/         # Workflow templates
 
 frontend/
-  ├── index.html             # Main UI (146 lines)
-  ├── app.js                 # Client logic (768 lines)
-  └── style.css              # Styling (509 lines)
+  ├── index.html             # Main UI
+  ├── app.js                 # Client logic
+  └── style.css              # Styling
 ```
 
 ---
@@ -255,14 +274,20 @@ python -m backend.app
 
 ---
 
-## Quick Start for New Copilot Instance
+### Quick Start for New Copilot Instance
 
-1. **Understand the platform:** Jetson Orin Nano, 2x CSI cameras, GStreamer-based
+1. **Understand the architecture:** Platform-agnostic design with backend abstraction layer
+   - Primary development: Jetson Orin Nano with IMX477 CSI cameras
+   - Factory pattern selects appropriate backend (Jetson, Raspberry Pi, webcam, etc.)
 2. **Check running state:** `ps aux | grep python` - is server running?
-3. **View settings:** `ls backend/camera/settings/jetson/` - see saved camera configs
+3. **View settings:** `ls backend/camera/settings/{platform}/` - see saved camera configs
 4. **Test cameras:** Access web UI at http://localhost:5000
 5. **Check logs:** Terminal output shows all control changes and debug info
-6. **Key files:** `backend/camera/jetson.py` (camera logic), `frontend/app.js` (UI logic)
+6. **Key files:** 
+   - `backend/camera/base.py` - Abstract camera interface
+   - `backend/camera/factory.py` - Platform detection
+   - `backend/camera/jetson.py` - Current implementation
+   - `frontend/app.js` - UI logic
 
 ### Most Common User Requests
 - "Add control for X" → See "Adding a New Camera Control" above
