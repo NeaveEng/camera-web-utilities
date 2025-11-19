@@ -1398,6 +1398,12 @@ function openCalibrationWizard() {
         session_name: null  // Will be auto-generated on first capture
     };
 
+    // Hide skip to calibration button initially
+    const skipBtn = document.getElementById('skip-to-calibration-btn');
+    if (skipBtn) {
+        skipBtn.style.display = 'none';
+    }
+
     // Populate camera selector
     populateCalibrationCameraSelect();
 
@@ -1486,6 +1492,31 @@ function showWizardStep(stepNumber) {
     if (stepNumber === 2) {
         // Auto-start camera preview when entering capture step
         initializeCapturePreview();
+
+        // Initialize and draw coverage map if we have loaded data
+        if (coverageMapData.length > 0 && !coverageMapCanvas) {
+            coverageMapCanvas = document.getElementById('coverage-map-canvas');
+            if (coverageMapCanvas) {
+                coverageMapContext = coverageMapCanvas.getContext('2d');
+                // Set canvas size based on first detection or default
+                const imageWidth = coverageMapData[0]?.imageWidth || 1920;
+                const imageHeight = coverageMapData[0]?.imageHeight || 1080;
+                coverageMapCanvas.width = imageWidth;
+                coverageMapCanvas.height = imageHeight;
+
+                // Draw the coverage map
+                drawCoverageMap();
+
+                // Hide placeholder
+                const placeholder = document.querySelector('.coverage-map-placeholder');
+                if (placeholder) placeholder.style.display = 'none';
+            }
+        } else if (coverageMapData.length > 0 && coverageMapCanvas) {
+            // Canvas exists, just redraw
+            drawCoverageMap();
+            const placeholder = document.querySelector('.coverage-map-placeholder');
+            if (placeholder) placeholder.style.display = 'none';
+        }
     } else if (stepNumber !== 2 && calibrationCameraActive) {
         // Stop camera when leaving capture step
         stopCalibrationCamera();
@@ -1509,7 +1540,7 @@ function showWizardStep(stepNumber) {
             nextBtn.textContent = 'Finish';
             nextBtn.onclick = finishCalibration;
             // Update review panel when entering step 4
-            updateReviewPanel();
+            updateReviewPanel().catch(err => console.error('Error updating review panel:', err));
         } else {
             nextBtn.textContent = 'Next →';
             nextBtn.onclick = () => navigateWizard(1);
@@ -1617,6 +1648,15 @@ function setupSetupStepListeners() {
             element.addEventListener('input', updateBoardInfo);
         }
     });
+
+    // Skip to Calibration button
+    const skipBtn = document.getElementById('skip-to-calibration-btn');
+    if (skipBtn) {
+        skipBtn.addEventListener('click', () => {
+            // Jump directly to step 3 (calibration)
+            showWizardStep(3);
+        });
+    }
 
     // Generate board button
     const generateBtn = document.getElementById('generate-board-btn');
@@ -1767,19 +1807,30 @@ async function loadPreviousCalibration(sessionPath) {
                 coverageMapContext = coverageMapCanvas.getContext('2d');
                 coverageMapCanvas.width = imageWidth;
                 coverageMapCanvas.height = imageHeight;
-            }
-        }
 
-        // Redraw coverage map with loaded data
-        if (coverageMapContext) {
+                // Draw coverage map now that canvas is initialized
+                drawCoverageMap();
+                // Hide placeholder
+                const placeholder = document.querySelector('.coverage-map-placeholder');
+                if (placeholder) placeholder.style.display = 'none';
+            }
+        } else {
+            // Canvas already exists, just redraw
+            coverageMapCanvas.width = imageWidth;
+            coverageMapCanvas.height = imageHeight;
             drawCoverageMap();
-            // Hide placeholder
             const placeholder = document.querySelector('.coverage-map-placeholder');
             if (placeholder) placeholder.style.display = 'none';
         }
 
         // Update pose diversity stats
         updatePoseDiversityStats();
+
+        // Show "Skip to Calibration" button since we have captured images
+        const skipBtn = document.getElementById('skip-to-calibration-btn');
+        if (skipBtn && session.images.length > 0) {
+            skipBtn.style.display = 'inline-block';
+        }
 
         await showAlert('Session Loaded', `Loaded calibration session with ${session.images.length} captured images.\n\nPose diversity: ${captureCount} captures analyzed.\n\nYou can continue capturing or proceed to calibration.`);
 
@@ -1995,14 +2046,18 @@ async function startCalibrationCamera() {
         // Initialize coverage map canvas with actual camera resolution
         coverageMapCanvas = document.getElementById('coverage-map-canvas');
         coverageMapContext = coverageMapCanvas.getContext('2d');
-        coverageMapData = [];
-        captureCount = 0;
+
+        // Only clear coverage data if we don't have loaded data from a previous session
+        if (coverageMapData.length === 0) {
+            coverageMapData = [];
+            captureCount = 0;
+        }
 
         // Set canvas size to match camera resolution
         coverageMapCanvas.width = canvasWidth;
         coverageMapCanvas.height = canvasHeight;
 
-        // Draw initial empty coverage map
+        // Draw coverage map (either empty or with loaded data)
         drawCoverageMap();
 
         // Hide placeholder
@@ -2621,52 +2676,112 @@ async function runCalibration() {
     btn.disabled = true;
     btn.textContent = '⏳ Calibrating...';
 
+    // Clear previous log entries
+    document.getElementById('calibration-log').innerHTML = '';
+
     // Update status
-    updateCalibrationStatus('⏳', 'Processing Images', 'Analyzing calibration pattern...');
+    updateCalibrationStatus('⏳', 'Starting Calibration', 'Preparing to process images...');
+    addCalibrationLog('Calibration process started');
 
-    // Simulate calibration progress
-    await simulateCalibrationProgress();
-
-    // Simulate results
-    calibrationData.results = {
-        reprojection_error: (Math.random() * 0.5 + 0.2).toFixed(3),
-        images_used: calibrationData.captured_images.length,
-        camera_matrix: [
-            [1000.5, 0, 640.2],
-            [0, 1000.8, 360.5],
-            [0, 0, 1]
-        ],
-        distortion_coeffs: [
-            -0.12, 0.08, -0.001, 0.002, -0.03
-        ]
-    };
-
-    updateCalibrationStatus('✅', 'Calibration Complete', 'Successfully calibrated camera');
-    addCalibrationLog('Calibration completed successfully', 'success');
-
-    btn.disabled = false;
-    btn.textContent = '✓ Calibration Complete';
-    btn.classList.remove('btn-primary');
-    btn.classList.add('btn-success');
-}
-
-async function simulateCalibrationProgress() {
+    // Reset progress
     const progressBar = document.getElementById('calibration-progress');
     const progressLabel = document.getElementById('calibration-progress-label');
+    progressBar.style.width = '0%';
+    progressLabel.textContent = '0%';
 
-    const steps = [
-        { percent: 20, message: 'Loading images...' },
-        { percent: 40, message: 'Detecting calibration patterns...' },
-        { percent: 60, message: 'Computing camera parameters...' },
-        { percent: 80, message: 'Refining calibration...' },
-        { percent: 100, message: 'Finalizing results...' }
-    ];
+    try {
+        // Check if we have captured images
+        if (!calibrationData.session_name) {
+            throw new Error('No calibration session found. Please capture images first.');
+        }
 
-    for (const step of steps) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        progressBar.style.width = step.percent + '%';
-        progressLabel.textContent = step.percent + '%';
-        addCalibrationLog(step.message);
+        if (calibrationData.captured_images.length === 0) {
+            throw new Error('No images captured. Please capture calibration images first.');
+        }
+
+        addCalibrationLog(`Found ${calibrationData.captured_images.length} captured images`);
+        progressBar.style.width = '10%';
+        progressLabel.textContent = '10%';
+
+        // Use board configuration from calibrationData
+        const boardConfig = {
+            dictionary: calibrationData.board.dictionary,
+            width: calibrationData.board.width,
+            height: calibrationData.board.height,
+            square_length: calibrationData.board.square_length,
+            marker_length: calibrationData.board.marker_length
+        };
+
+        addCalibrationLog('Board configuration loaded');
+        progressBar.style.width = '20%';
+        progressLabel.textContent = '20%';
+
+        // Call backend calibration API
+        addCalibrationLog('Sending calibration request to server...');
+        updateCalibrationStatus('⏳', 'Processing Images', 'Running calibration algorithm...');
+
+        const response = await fetch('/api/calibration/run', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_name: calibrationData.session_name,
+                camera_id: calibrationData.camera_id,
+                board_config: boardConfig
+            })
+        });
+
+        progressBar.style.width = '60%';
+        progressLabel.textContent = '60%';
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            throw new Error(result.error || 'Calibration failed');
+        }
+
+        addCalibrationLog(`Processed ${result.images_used} images successfully`);
+        progressBar.style.width = '80%';
+        progressLabel.textContent = '80%';
+
+        // Store calibration results
+        calibrationData.results = result;
+
+        addCalibrationLog(`Reprojection error: ${result.reprojection_error.toFixed(4)} pixels`);
+        addCalibrationLog('Computing final parameters...');
+        progressBar.style.width = '100%';
+        progressLabel.textContent = '100%';
+
+        // Update status to complete
+        updateCalibrationStatus('✅', 'Calibration Complete',
+            `Successfully calibrated with error: ${result.reprojection_error.toFixed(4)} pixels`);
+        addCalibrationLog('Calibration completed successfully!', 'success');
+
+        // Update button
+        btn.disabled = false;
+        btn.textContent = '✓ Calibration Complete';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-success');
+
+        // Enable next button
+        const nextBtn = document.querySelector('[data-panel="3"] .wizard-next');
+        if (nextBtn) {
+            nextBtn.disabled = false;
+        }
+
+    } catch (error) {
+        console.error('Calibration error:', error);
+
+        updateCalibrationStatus('❌', 'Calibration Failed', error.message);
+        addCalibrationLog(`Error: ${error.message}`, 'error');
+
+        btn.disabled = false;
+        btn.textContent = '🔄 Retry Calibration';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+
+        await showAlert('Calibration Failed', error.message);
     }
 }
 
@@ -2696,35 +2811,238 @@ function setupReviewStepListeners() {
 }
 
 // Update review panel when entering step 4
-function updateReviewPanel() {
+async function updateReviewPanel() {
     if (!calibrationData.results) return;
 
     const results = calibrationData.results;
 
     // Update metrics
-    document.getElementById('result-error').textContent = results.reprojection_error;
+    document.getElementById('result-error').textContent =
+        typeof results.reprojection_error === 'number'
+            ? results.reprojection_error.toFixed(4)
+            : results.reprojection_error;
     document.getElementById('result-images').textContent = results.images_used;
 
-    const quality = results.reprojection_error < 0.5 ? 'Excellent' :
-        results.reprojection_error < 1.0 ? 'Good' : 'Fair';
-    document.getElementById('result-quality').textContent = quality;
+    // Determine quality based on reprojection error
+    const error = parseFloat(results.reprojection_error);
+    let quality, qualityColor;
+    if (error < 0.3) {
+        quality = 'Excellent';
+        qualityColor = '#28a745';
+    } else if (error < 0.5) {
+        quality = 'Very Good';
+        qualityColor = '#5cb85c';
+    } else if (error < 0.8) {
+        quality = 'Good';
+        qualityColor = '#ffc107';
+    } else if (error < 1.5) {
+        quality = 'Fair';
+        qualityColor = '#fd7e14';
+    } else {
+        quality = 'Poor';
+        qualityColor = '#dc3545';
+    }
+
+    const qualityEl = document.getElementById('result-quality');
+    qualityEl.textContent = quality;
+    qualityEl.style.color = qualityColor;
+    qualityEl.style.fontWeight = 'bold';
 
     // Update camera matrix
     const matrixHTML = results.camera_matrix
-        .map(row => row.map(v => v.toFixed(2).padStart(8)).join('  '))
+        .map(row => row.map(v => parseFloat(v).toFixed(2).padStart(10)).join('  '))
         .join('\n');
     document.getElementById('camera-matrix').innerHTML = `<code>${matrixHTML}</code>`;
 
     // Update distortion coefficients
     const distHTML = results.distortion_coeffs
-        .map(v => v.toFixed(4).padStart(8))
+        .map(v => parseFloat(v).toFixed(6).padStart(12))
         .join('\n');
     document.getElementById('distortion-coeffs').innerHTML = `<code>${distHTML}</code>`;
 
-    // Set default calibration name
+    // Set default calibration name using session name
     const timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const sessionPart = calibrationData.session_name ?
+        calibrationData.session_name.replace('session_', '') :
+        timestamp;
     document.getElementById('calibration-name').value =
-        `camera_${calibrationData.camera_id}_${timestamp}`;
+        `camera_${calibrationData.camera_id}_${sessionPart}`;
+
+    // Display per-image errors if available
+    if (results.image_errors && results.image_errors.length > 0) {
+        const errorContainer = document.getElementById('image-errors');
+        const maxError = Math.max(...results.image_errors.map(img => img.error));
+        const minError = Math.min(...results.image_errors.map(img => img.error));
+
+        let html = `<div style="margin-bottom: 10px; padding: 8px; background: #f8f9fa; border-radius: 4px; font-size: 0.85em;">
+            <strong>Error Range:</strong> ${minError.toFixed(4)} - ${maxError.toFixed(4)} pixels
+        </div>`;
+
+        html += '<div style="max-height: 200px; overflow-y: auto;">';
+        html += '<table style="width: 100%; font-size: 0.85em; border-collapse: collapse;">';
+        html += '<thead><tr style="background: #f0f4ff; border-bottom: 2px solid #ddd;">';
+        html += '<th style="padding: 6px; text-align: left;">Image</th>';
+        html += '<th style="padding: 6px; text-align: center;">Corners</th>';
+        html += '<th style="padding: 6px; text-align: right;">Error (px)</th>';
+        html += '</tr></thead><tbody>';
+
+        results.image_errors.forEach((img, idx) => {
+            const errorPercent = ((img.error - minError) / (maxError - minError)) * 100;
+            let barColor = '#28a745'; // Green
+            if (img.error > 1.0) barColor = '#dc3545'; // Red
+            else if (img.error > 0.5) barColor = '#ffc107'; // Yellow
+
+            html += `<tr style="border-bottom: 1px solid #eee;">
+                <td style="padding: 6px;">${img.filename}</td>
+                <td style="padding: 6px; text-align: center;">${img.corners}</td>
+                <td style="padding: 6px; text-align: right;">
+                    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
+                        <div style="width: 60px; height: 4px; background: #e9ecef; border-radius: 2px; overflow: hidden;">
+                            <div style="width: ${errorPercent}%; height: 100%; background: ${barColor};"></div>
+                        </div>
+                        <span style="font-family: monospace; min-width: 50px;">${img.error.toFixed(4)}</span>
+                    </div>
+                </td>
+            </tr>`;
+        });
+
+        html += '</tbody></table></div>';
+        errorContainer.innerHTML = html;
+    }
+
+    // Populate image selector for comparison
+    await populateImageSelector();
+}
+
+async function populateImageSelector() {
+    const select = document.getElementById('preview-image-select');
+
+    if (!calibrationData.results || !calibrationData.results.image_errors) {
+        select.innerHTML = '<option value="">No images available</option>';
+        return;
+    }
+
+    // Populate with available images
+    select.innerHTML = '';
+    calibrationData.results.image_errors.forEach((img, idx) => {
+        const option = document.createElement('option');
+        option.value = img.filename;
+        option.textContent = `${img.filename} (${img.corners} corners, ${img.error.toFixed(4)}px error)`;
+        select.appendChild(option);
+    });
+
+    // Load first image by default
+    if (calibrationData.results.image_errors.length > 0) {
+        select.value = calibrationData.results.image_errors[0].filename;
+        await loadComparisonImages(calibrationData.results.image_errors[0].filename);
+    }
+
+    // Add event listener for image selection
+    select.addEventListener('change', async (e) => {
+        if (e.target.value) {
+            await loadComparisonImages(e.target.value);
+            updateImageNavigationButtons();
+        }
+    });
+
+    // Setup previous/next buttons
+    const prevBtn = document.getElementById('prev-image-btn');
+    const nextBtn = document.getElementById('next-image-btn');
+
+    if (prevBtn) {
+        prevBtn.addEventListener('click', () => navigateImage(-1));
+    }
+
+    if (nextBtn) {
+        nextBtn.addEventListener('click', () => navigateImage(1));
+    }
+
+    // Update button states
+    updateImageNavigationButtons();
+}
+
+function navigateImage(direction) {
+    const select = document.getElementById('preview-image-select');
+    const currentIndex = select.selectedIndex;
+    const newIndex = currentIndex + direction;
+
+    if (newIndex >= 0 && newIndex < select.options.length) {
+        select.selectedIndex = newIndex;
+        select.dispatchEvent(new Event('change'));
+    }
+}
+
+function updateImageNavigationButtons() {
+    const select = document.getElementById('preview-image-select');
+    const prevBtn = document.getElementById('prev-image-btn');
+    const nextBtn = document.getElementById('next-image-btn');
+
+    if (prevBtn) {
+        prevBtn.disabled = select.selectedIndex === 0;
+    }
+
+    if (nextBtn) {
+        nextBtn.disabled = select.selectedIndex === select.options.length - 1;
+    }
+}
+
+async function loadComparisonImages(filename) {
+    try {
+        const response = await fetch('/api/calibration/undistort-image', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                session_name: calibrationData.session_name,
+                camera_id: calibrationData.camera_id,
+                image_filename: filename
+            })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+            console.error('Failed to load comparison images:', result.error);
+            return;
+        }
+
+        // Load images
+        const originalImg = new Image();
+        const undistortedImg = new Image();
+
+        originalImg.onload = () => {
+            const canvas = document.getElementById('original-image');
+            const ctx = canvas.getContext('2d');
+
+            // Set canvas size to match image aspect ratio
+            const maxWidth = 500;
+            const scale = maxWidth / originalImg.width;
+            canvas.width = maxWidth;
+            canvas.height = originalImg.height * scale;
+
+            ctx.drawImage(originalImg, 0, 0, canvas.width, canvas.height);
+        };
+
+        undistortedImg.onload = () => {
+            const canvas = document.getElementById('undistorted-image');
+            const ctx = canvas.getContext('2d');
+
+            // Set canvas size to match image aspect ratio
+            const maxWidth = 500;
+            const scale = maxWidth / undistortedImg.width;
+            canvas.width = maxWidth;
+            canvas.height = undistortedImg.height * scale;
+
+            ctx.drawImage(undistortedImg, 0, 0, canvas.width, canvas.height);
+        };
+
+        originalImg.src = result.original;
+        undistortedImg.src = result.undistorted;
+
+    } catch (error) {
+        console.error('Error loading comparison images:', error);
+    }
 }
 
 async function saveCalibration() {

@@ -13,6 +13,7 @@ from backend.camera.factory import get_camera_backend, detect_platform
 from backend.camera.groups import CameraGroupManager
 from backend.features.manager import FeatureManager
 from backend.workflows.manager import WorkflowManager
+from backend.calibration_utils import calibrate_camera_from_session, save_calibration_results
 
 
 # Initialize Flask app
@@ -1437,7 +1438,149 @@ def index():
     print(f'Serving index.html from: {frontend_dir}')  # Debug
     return send_from_directory(frontend_dir, 'index.html')
 
+
+@app.route('/api/calibration/run', methods=['POST'])
+def run_calibration():
+    """Run camera calibration on captured images."""
+    try:
+        from datetime import datetime
+        
+        data = request.json
+        session_name = data.get('session_name')
+        camera_id = data.get('camera_id')
+        board_config = data.get('board_config')
+        
+        if not session_name or not camera_id or not board_config:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameters: session_name, camera_id, and board_config'
+            }), 400
+        
+        # Build path to session directory
+        calibration_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', 'data', 'calibration'
+        ))
+        session_path = os.path.join(calibration_dir, session_name, str(camera_id))
+        
+        if not os.path.exists(session_path):
+            return jsonify({
+                'success': False,
+                'error': f'Session directory not found: {session_path}'
+            }), 404
+        
+        # Run calibration
+        results = calibrate_camera_from_session(session_path, board_config)
+        
+        if not results.get('success', False):
+            return jsonify(results), 400
+        
+        # Add timestamp
+        results['timestamp'] = datetime.now().isoformat()
+        
+        # Save calibration results to session directory
+        calibration_file = os.path.join(session_path, 'calibration_results.json')
+        import json
+        with open(calibration_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        return jsonify(results)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/calibration/undistort-image', methods=['POST'])
+def undistort_image_endpoint():
+    """Apply calibration to undistort an image."""
+    try:
+        import numpy as np
+        import cv2
+        import base64
+        
+        data = request.json
+        session_name = data.get('session_name')
+        camera_id = data.get('camera_id')
+        image_filename = data.get('image_filename')
+        
+        if not session_name or not camera_id or not image_filename:
+            return jsonify({
+                'success': False,
+                'error': 'Missing required parameters'
+            }), 400
+        
+        # Build paths
+        calibration_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', 'data', 'calibration'
+        ))
+        session_path = os.path.join(calibration_dir, session_name, str(camera_id))
+        image_path = os.path.join(session_path, image_filename)
+        calibration_file = os.path.join(session_path, 'calibration_results.json')
+        
+        if not os.path.exists(image_path):
+            return jsonify({
+                'success': False,
+                'error': f'Image not found: {image_filename}'
+            }), 404
+        
+        if not os.path.exists(calibration_file):
+            return jsonify({
+                'success': False,
+                'error': 'Calibration results not found'
+            }), 404
+        
+        # Load calibration data
+        import json
+        with open(calibration_file, 'r') as f:
+            calibration = json.load(f)
+        
+        camera_matrix = np.array(calibration['camera_matrix'])
+        dist_coeffs = np.array(calibration['distortion_coeffs'])
+        
+        # Load and undistort image
+        img = cv2.imread(image_path)
+        if img is None:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to load image'
+            }), 500
+        
+        # Undistort using the calibration parameters
+        # Use alpha=0 to crop out black areas, or use simple undistort without optimal matrix
+        h, w = img.shape[:2]
+        
+        # Method 1: Simple undistort (keeps all pixels, may have black borders)
+        undistorted = cv2.undistort(img, camera_matrix, dist_coeffs, None, camera_matrix)
+        
+        # Encode both images to JPEG and then base64
+        _, original_buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        _, undistorted_buffer = cv2.imencode('.jpg', undistorted, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        
+        original_base64 = base64.b64encode(original_buffer).decode('utf-8')
+        undistorted_base64 = base64.b64encode(undistorted_buffer).decode('utf-8')
+        
+        return jsonify({
+            'success': True,
+            'original': f'data:image/jpeg;base64,{original_base64}',
+            'undistorted': f'data:image/jpeg;base64,{undistorted_base64}',
+            'image_size': [w, h]
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @app.route('/<path:path>')
+
 def serve_static(path):
     """Serve static files (CSS, JS)."""
     # Don't intercept API routes
