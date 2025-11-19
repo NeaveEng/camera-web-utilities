@@ -1320,7 +1320,6 @@ function initializeCalibrationWizard() {
     const calibrationBtn = document.getElementById('calibration-btn');
     const calibrationModal = document.getElementById('calibration-modal');
     const closeBtn = calibrationModal.querySelector('.close');
-    const wizardCancel = document.getElementById('wizard-cancel');
 
     // Open modal
     calibrationBtn.addEventListener('click', () => {
@@ -1330,16 +1329,6 @@ function initializeCalibrationWizard() {
     // Close modal
     closeBtn.addEventListener('click', () => {
         closeCalibrationWizard();
-    });
-
-    wizardCancel.addEventListener('click', async () => {
-        const confirmed = await showConfirm(
-            'Cancel Calibration',
-            'Are you sure you want to cancel calibration? All progress will be lost.'
-        );
-        if (confirmed) {
-            closeCalibrationWizard();
-        }
     });
 
     // Setup step event listeners
@@ -1437,21 +1426,52 @@ function showWizardStep(stepNumber) {
         }
     });
 
-    // Update navigation buttons
-    const prevBtn = document.getElementById('wizard-prev');
-    const nextBtn = document.getElementById('wizard-next');
+    // Step-specific actions
+    if (stepNumber === 2) {
+        // Auto-start camera preview when entering capture step
+        initializeCapturePreview();
+    } else if (stepNumber !== 2 && calibrationCameraActive) {
+        // Stop camera when leaving capture step
+        stopCalibrationCamera();
+    }
 
-    prevBtn.disabled = currentWizardStep === 1;
-    prevBtn.onclick = () => navigateWizard(-1);
+    // Update navigation buttons in current panel
+    const activePanel = document.querySelector(`.wizard-panel[data-panel="${currentWizardStep}"]`);
+    if (!activePanel) return;
 
-    if (currentWizardStep === 4) {
-        nextBtn.textContent = 'Finish';
-        nextBtn.onclick = finishCalibration;
-        // Update review panel when entering step 4
-        updateReviewPanel();
-    } else {
-        nextBtn.textContent = 'Next →';
-        nextBtn.onclick = () => navigateWizard(1);
+    const prevBtn = activePanel.querySelector('.wizard-prev');
+    const nextBtn = activePanel.querySelector('.wizard-next');
+    const cancelBtn = activePanel.querySelector('.wizard-cancel');
+
+    if (prevBtn) {
+        prevBtn.disabled = currentWizardStep === 1;
+        prevBtn.onclick = () => navigateWizard(-1);
+    }
+
+    if (nextBtn) {
+        if (currentWizardStep === 4) {
+            nextBtn.textContent = 'Finish';
+            nextBtn.onclick = finishCalibration;
+            // Update review panel when entering step 4
+            updateReviewPanel();
+        } else {
+            nextBtn.textContent = 'Next →';
+            nextBtn.onclick = () => navigateWizard(1);
+        }
+    }
+
+    if (cancelBtn) {
+        cancelBtn.onclick = handleWizardCancel;
+    }
+}
+
+async function handleWizardCancel() {
+    const confirmed = await showConfirm(
+        'Cancel Calibration',
+        'Are you sure you want to cancel calibration? All progress will be lost.'
+    );
+    if (confirmed) {
+        closeCalibrationWizard();
     }
 }
 
@@ -1656,11 +1676,24 @@ async function updateSetupCameraPreview(cameraId) {
 
 let calibrationCameraActive = false;
 let calibrationStreamInterval = null;
+let markerDetectionCanvas = null;
+let markerDetectionContext = null;
 
 function setupCaptureStepListeners() {
     document.getElementById('start-capture').addEventListener('click', toggleCalibrationCamera);
     document.getElementById('capture-image').addEventListener('click', captureCalibrationImage);
     document.getElementById('clear-captures').addEventListener('click', clearCapturedImages);
+}
+
+async function initializeCapturePreview() {
+    // Auto-start camera preview if not already active
+    if (!calibrationCameraActive && calibrationData.camera_id) {
+        const btn = document.getElementById('start-capture');
+        btn.textContent = '⏹️ Stop Camera';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+        await startCalibrationCamera();
+    }
 }
 
 async function toggleCalibrationCamera() {
@@ -1694,15 +1727,34 @@ async function startCalibrationCamera() {
             throw new Error(data.message || 'Failed to start camera');
         }
 
-        // Show preview stream
+        // Create preview with overlay canvas
         const previewDiv = document.querySelector('.capture-preview');
-        previewDiv.innerHTML = `<img src="${API_BASE}/api/cameras/${cameraId}/stream" 
-                                     style="width: 100%; height: 100%; object-fit: contain;">`;
+        previewDiv.innerHTML = `
+            <div style="position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
+                <img id="capture-stream-img" 
+                     src="${API_BASE}/api/cameras/${cameraId}/stream" 
+                     style="max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block;">
+                <canvas id="marker-overlay-canvas" 
+                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;">
+                </canvas>
+            </div>
+        `;
+
+        // Initialize canvas for marker overlay
+        markerDetectionCanvas = document.getElementById('marker-overlay-canvas');
+        markerDetectionContext = markerDetectionCanvas.getContext('2d');
+
+        // Set canvas size to match image
+        const img = document.getElementById('capture-stream-img');
+        img.onload = () => {
+            markerDetectionCanvas.width = img.naturalWidth || 640;
+            markerDetectionCanvas.height = img.naturalHeight || 480;
+        };
 
         calibrationCameraActive = true;
         document.getElementById('capture-image').disabled = false;
 
-        // Start pattern detection simulation (placeholder)
+        // Start pattern detection with marker overlay
         startPatternDetection();
 
     } catch (error) {
@@ -1723,16 +1775,48 @@ function stopCalibrationCamera() {
         </div>
     `;
 
+    // Clean up canvas references
+    markerDetectionCanvas = null;
+    markerDetectionContext = null;
+
     stopPatternDetection();
 }
 
 function startPatternDetection() {
-    // Placeholder: Simulate pattern detection
-    // In real implementation, this would call backend API to detect pattern
-    calibrationStreamInterval = setInterval(() => {
-        const detected = Math.random() > 0.5; // Random detection
-        document.getElementById('pattern-status').textContent = detected ? '✅ Yes' : '❌ No';
-    }, 1000);
+    // Call backend API to detect ChArUco pattern and overlay markers
+    calibrationStreamInterval = setInterval(async () => {
+        if (!calibrationCameraActive || !calibrationData.camera_id) return;
+
+        try {
+            // Get current frame and detect pattern
+            const response = await fetch(`${API_BASE}/api/calibration/detect-pattern`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    camera_id: calibrationData.camera_id,
+                    board_config: calibrationData.board
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success && data.detection) {
+                const detection = data.detection;
+                document.getElementById('pattern-status').textContent = detection.detected ? '✅ Yes' : '❌ No';
+
+                // Draw marker overlay if detected
+                if (detection.detected && markerDetectionContext && markerDetectionCanvas) {
+                    drawMarkerOverlay(detection);
+                }
+            } else {
+                document.getElementById('pattern-status').textContent = '❌ No';
+                clearMarkerOverlay();
+            }
+        } catch (error) {
+            console.error('Pattern detection error:', error);
+            // Silently fail - don't disrupt the UI
+        }
+    }, 500); // Check every 500ms
 }
 
 function stopPatternDetection() {
@@ -1741,6 +1825,76 @@ function stopPatternDetection() {
         calibrationStreamInterval = null;
     }
     document.getElementById('pattern-status').textContent = '❌ No';
+    clearMarkerOverlay();
+}
+
+function drawMarkerOverlay(detection) {
+    if (!markerDetectionContext || !markerDetectionCanvas) return;
+
+    // Clear previous overlay
+    markerDetectionContext.clearRect(0, 0, markerDetectionCanvas.width, markerDetectionCanvas.height);
+
+    const scaleX = markerDetectionCanvas.width / (detection.image_width || 1);
+    const scaleY = markerDetectionCanvas.height / (detection.image_height || 1);
+
+    // Draw detected ArUco markers
+    if (detection.marker_corners && detection.marker_corners.length > 0) {
+        markerDetectionContext.strokeStyle = '#00ff00';
+        markerDetectionContext.lineWidth = 3;
+
+        detection.marker_corners.forEach((corners, idx) => {
+            markerDetectionContext.beginPath();
+            corners.forEach((corner, i) => {
+                const x = corner[0] * scaleX;
+                const y = corner[1] * scaleY;
+                if (i === 0) {
+                    markerDetectionContext.moveTo(x, y);
+                } else {
+                    markerDetectionContext.lineTo(x, y);
+                }
+            });
+            markerDetectionContext.closePath();
+            markerDetectionContext.stroke();
+
+            // Draw marker ID if available
+            if (detection.marker_ids && detection.marker_ids[idx] !== undefined) {
+                const centerX = corners.reduce((sum, c) => sum + c[0], 0) / 4 * scaleX;
+                const centerY = corners.reduce((sum, c) => sum + c[1], 0) / 4 * scaleY;
+                markerDetectionContext.fillStyle = '#00ff00';
+                markerDetectionContext.font = '16px Arial';
+                markerDetectionContext.fillText(detection.marker_ids[idx].toString(), centerX - 10, centerY + 5);
+            }
+        });
+    }
+
+    // Draw ChArUco corners
+    if (detection.charuco_corners && detection.charuco_corners.length > 0) {
+        markerDetectionContext.fillStyle = '#ff0000';
+        detection.charuco_corners.forEach(corner => {
+            const x = corner[0] * scaleX;
+            const y = corner[1] * scaleY;
+            markerDetectionContext.beginPath();
+            markerDetectionContext.arc(x, y, 5, 0, 2 * Math.PI);
+            markerDetectionContext.fill();
+        });
+    }
+
+    // Draw detection quality indicator
+    if (detection.corners_detected !== undefined) {
+        markerDetectionContext.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        markerDetectionContext.fillRect(10, 10, 280, 80);
+        markerDetectionContext.fillStyle = '#ffffff';
+        markerDetectionContext.font = '14px Arial';
+        markerDetectionContext.fillText(`Markers: ${detection.markers_detected || 0}`, 20, 30);
+        markerDetectionContext.fillText(`Corners: ${detection.corners_detected || 0}`, 20, 50);
+        markerDetectionContext.fillText(`Quality: ${detection.quality || 'Unknown'}`, 20, 70);
+    }
+}
+
+function clearMarkerOverlay() {
+    if (markerDetectionContext && markerDetectionCanvas) {
+        markerDetectionContext.clearRect(0, 0, markerDetectionCanvas.width, markerDetectionCanvas.height);
+    }
 }
 
 function captureCalibrationImage() {

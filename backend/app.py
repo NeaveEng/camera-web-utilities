@@ -697,6 +697,93 @@ def delete_sensor_config(sensor):
 
 
 # ============================================================================
+# Calibration API Endpoints
+# ============================================================================
+
+@app.route('/api/calibration/detect-pattern', methods=['POST'])
+def detect_calibration_pattern():
+    """Detect ChArUco pattern in current camera frame."""
+    try:
+        data = request.json
+        camera_id = data.get('camera_id')
+        board_config = data.get('board_config', {})
+        
+        if not camera_id:
+            return jsonify({
+                'success': False,
+                'message': 'Camera ID is required'
+            }), 400
+        
+        # Get calibration plugin
+        calibration_plugin = feature_manager.get_plugin('calibration')
+        if not calibration_plugin:
+            return jsonify({
+                'success': False,
+                'message': 'Calibration plugin not available'
+            }), 500
+        
+        # Configure board if parameters provided
+        if board_config:
+            calibration_plugin.configure_board(
+                width=board_config.get('width', 8),
+                height=board_config.get('height', 5),
+                square_length=board_config.get('square_length', 50.0),
+                marker_length=board_config.get('marker_length', 37.0),
+                dictionary=board_config.get('dictionary', 'DICT_6X6_100')
+            )
+        
+        # Get current frame from camera
+        frame = camera_backend.get_full_frame(camera_id)
+        if frame is None:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to get frame from camera. Is the camera streaming?'
+            }), 500
+        
+        # Detect pattern
+        detection = calibration_plugin.detect_charuco_pattern(frame)
+        
+        # Prepare response with detection results
+        response_data = {
+            'success': True,
+            'detection': {
+                'detected': detection.get('detected', False),
+                'markers_detected': detection.get('markers_detected', 0),
+                'corners_detected': detection.get('corners_detected', 0),
+                'quality': detection.get('quality', 'Unknown'),
+                'image_width': frame.shape[1] if frame is not None else 0,
+                'image_height': frame.shape[0] if frame is not None else 0,
+            }
+        }
+        
+        # Add marker corners if detected
+        if detection.get('marker_corners') is not None:
+            # Convert numpy arrays to lists for JSON serialization
+            marker_corners = detection['marker_corners']
+            response_data['detection']['marker_corners'] = [
+                corners.reshape(-1, 2).tolist() for corners in marker_corners
+            ]
+        
+        # Add marker IDs if available
+        if detection.get('marker_ids') is not None:
+            response_data['detection']['marker_ids'] = detection['marker_ids'].flatten().tolist()
+        
+        # Add ChArUco corners if detected
+        if detection.get('charuco_corners') is not None:
+            response_data['detection']['charuco_corners'] = detection['charuco_corners'].reshape(-1, 2).tolist()
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+
+# ============================================================================
 # Frontend Routes
 # ============================================================================
 
