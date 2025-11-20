@@ -470,10 +470,69 @@ function renderControls(slot, cameraId, controls, resolutionInfo) {
         </div>
     `;
 
+    // Add image processing section
+    html += `
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="color: #667eea; margin: 0; font-size: 1em;">Image Processing</h3>
+                <label style="margin: 0;">
+                    <input type="checkbox" id="processing-enable-${cameraId}" onchange="toggleProcessing('${cameraId}', this.checked)">
+                    Enable
+                </label>
+            </div>
+            <div id="processing-panel-${cameraId}" style="display: none;">
+                <div class="control-item">
+                    <label>Processing Type</label>
+                    <select id="processing-type-${cameraId}" onchange="updateProcessingType('${cameraId}', this.value)">
+                        <option value="undistort">Undistort (Calibration)</option>
+                        <option value="perspective">Perspective Transform</option>
+                        <option value="affine">Affine Transform</option>
+                        <option value="rotation">Rotation</option>
+                        <option value="custom_matrix">Custom Matrix</option>
+                    </select>
+                </div>
+                
+                <div id="processing-params-${cameraId}">
+                    <!-- Parameters will be injected here based on type -->
+                </div>
+                
+                <button class="btn btn-secondary" onclick="applyProcessing('${cameraId}')" style="width: 100%; margin-top: 10px;">
+                    Apply Changes
+                </button>
+            </div>
+        </div>
+    `;
+
     container.innerHTML = html;
 
     // Attach event listeners
     attachControlListeners(cameraId);
+
+    // Restore processing state from localStorage
+    const processingState = JSON.parse(localStorage.getItem('processingState') || '{}');
+    const savedState = processingState[cameraId];
+
+    if (savedState) {
+        // Restore enabled state
+        const enableCheckbox = document.getElementById(`processing-enable-${cameraId}`);
+        if (enableCheckbox && savedState.enabled) {
+            enableCheckbox.checked = true;
+            const panel = document.getElementById(`processing-panel-${cameraId}`);
+            if (panel) {
+                panel.style.display = 'block';
+            }
+        }
+
+        // Restore type selection
+        const typeSelector = document.getElementById(`processing-type-${cameraId}`);
+        if (typeSelector && savedState.type) {
+            typeSelector.value = savedState.type;
+        }
+    }
+
+    // Initialize processing panel with saved or default type
+    const initialType = savedState?.type || 'undistort';
+    updateProcessingType(cameraId, initialType);
 }
 
 function renderControl(cameraId, control) {
@@ -881,16 +940,19 @@ function renderFeatureList() {
     }
 
     list.innerHTML = features.map(feature => `
-        <div class="feature-item" onclick="selectFeature('${feature.name}')">
-            <strong>${feature.name}</strong>
-            <br><small>${feature.description}</small>
-        </div>
+        <button class="btn btn-primary" onclick="selectFeature('${feature.name}')" title="${feature.description}" style="width: 100%; margin-bottom: 8px;">
+            ${feature.name}
+        </button>
     `).join('');
 }
 
 function selectFeature(featureName) {
-    // Future: Show feature UI
-    console.log('Selected feature:', featureName);
+    // Open calibration wizard for Camera Calibration feature
+    if (featureName === 'Camera Calibration') {
+        openCalibrationWizard();
+    } else {
+        console.log('Selected feature:', featureName);
+    }
 }
 
 // ============================================================================
@@ -1355,14 +1417,8 @@ let poseCounts = {
 
 // Initialize calibration wizard
 function initializeCalibrationWizard() {
-    const calibrationBtn = document.getElementById('calibration-btn');
     const calibrationModal = document.getElementById('calibration-modal');
     const closeBtn = calibrationModal.querySelector('.close');
-
-    // Open modal
-    calibrationBtn.addEventListener('click', () => {
-        openCalibrationWizard();
-    });
 
     // Close modal
     closeBtn.addEventListener('click', () => {
@@ -2718,7 +2774,28 @@ async function runCalibration() {
 
         // Call backend calibration API
         addCalibrationLog('Sending calibration request to server...');
-        updateCalibrationStatus('⏳', 'Processing Images', 'Running calibration algorithm...');
+        updateCalibrationStatus('⏳', 'Processing Images', 'Running calibration algorithm (estimated progress)...');
+
+        // Start simulated progress updates while waiting for response
+        let currentProgress = 20;
+        const progressInterval = setInterval(() => {
+            if (currentProgress < 90) {
+                currentProgress += 5;
+                progressBar.style.width = `${currentProgress}%`;
+                progressLabel.textContent = `${currentProgress}% (estimated)`;
+
+                // Update log messages at specific points
+                if (currentProgress === 30) {
+                    addCalibrationLog('Detecting ChArUco patterns in images...');
+                } else if (currentProgress === 50) {
+                    addCalibrationLog('Analyzing corner detections...');
+                } else if (currentProgress === 70) {
+                    addCalibrationLog('Computing camera parameters...');
+                } else if (currentProgress === 85) {
+                    addCalibrationLog('Calculating reprojection errors...');
+                }
+            }
+        }, 400); // Update every 400ms
 
         const response = await fetch('/api/calibration/run', {
             method: 'POST',
@@ -2732,8 +2809,10 @@ async function runCalibration() {
             })
         });
 
-        progressBar.style.width = '60%';
-        progressLabel.textContent = '60%';
+        // Stop progress simulation
+        clearInterval(progressInterval);
+        progressBar.style.width = '95%';
+        progressLabel.textContent = '95%';
 
         const result = await response.json();
 
@@ -2742,21 +2821,19 @@ async function runCalibration() {
         }
 
         addCalibrationLog(`Processed ${result.images_used} images successfully`);
-        progressBar.style.width = '80%';
-        progressLabel.textContent = '80%';
+        progressBar.style.width = '100%';
+        progressLabel.textContent = '100%';
 
         // Store calibration results
         calibrationData.results = result;
 
         addCalibrationLog(`Reprojection error: ${result.reprojection_error.toFixed(4)} pixels`);
-        addCalibrationLog('Computing final parameters...');
-        progressBar.style.width = '100%';
-        progressLabel.textContent = '100%';
+        addCalibrationLog('Calibration completed successfully!', 'success');
 
         // Update status to complete
         updateCalibrationStatus('✅', 'Calibration Complete',
             `Successfully calibrated with error: ${result.reprojection_error.toFixed(4)} pixels`);
-        addCalibrationLog('Calibration completed successfully!', 'success');
+        addCalibrationLog('Ready to review results!', 'success');
 
         // Update button
         btn.disabled = false;
@@ -3109,3 +3186,352 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(initializeCalibrationWizard, 100);
 });
 
+
+// ===== Image Processing Controls =====
+
+async function toggleProcessing(cameraId, enabled) {
+    const panel = document.getElementById(`processing-panel-${cameraId}`);
+    if (panel) {
+        panel.style.display = enabled ? 'block' : 'none';
+    }
+
+    // Save state to localStorage
+    const processingState = JSON.parse(localStorage.getItem('processingState') || '{}');
+    processingState[cameraId] = processingState[cameraId] || {};
+    processingState[cameraId].enabled = enabled;
+    localStorage.setItem('processingState', JSON.stringify(processingState));
+
+    if (!enabled) {
+        // Disable processing on backend
+        try {
+            const response = await fetch(`/api/processing/${cameraId}/disable`, {
+                method: 'POST'
+            });
+            if (!response.ok) {
+                console.error('Failed to disable processing');
+            }
+        } catch (error) {
+            console.error('Error disabling processing:', error);
+        }
+    } else {
+        // Re-apply saved processing when enabling
+        const savedConfig = processingState[cameraId];
+        if (savedConfig && savedConfig.type) {
+            // Update UI to match saved type
+            const typeSelector = document.getElementById(`processing-type-${cameraId}`);
+            if (typeSelector && savedConfig.type) {
+                typeSelector.value = savedConfig.type;
+                await updateProcessingType(cameraId, savedConfig.type);
+            }
+            // Apply processing after a short delay to ensure UI is updated
+            setTimeout(() => applyProcessing(cameraId, true), 100);
+        }
+    }
+}
+
+function updateProcessingType(cameraId, type) {
+    const paramsContainer = document.getElementById(`processing-params-${cameraId}`);
+    if (!paramsContainer) return;
+
+    // Save type to localStorage
+    const processingState = JSON.parse(localStorage.getItem('processingState') || '{}');
+    processingState[cameraId] = processingState[cameraId] || {};
+    processingState[cameraId].type = type;
+    localStorage.setItem('processingState', JSON.stringify(processingState));
+
+    let html = '';
+
+    switch (type) {
+        case 'undistort':
+            // Get saved state
+            const savedState = JSON.parse(localStorage.getItem('processingState') || '{}')[cameraId] || {};
+            const savedAlpha = savedState.alpha || 0;
+            const savedCalibrationFile = savedState.calibration_file || '';
+
+            html = `
+                <div class="control-item">
+                    <label>Calibration File</label>
+                    <select id="processing-calibration-file-${cameraId}" onchange="applyProcessing('${cameraId}', true)">
+                        <option value="">Select calibration...</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="loadCalibrationFiles('${cameraId}')" style="margin-top: 5px; width: 100%;">
+                        🔄 Refresh Files
+                    </button>
+                </div>
+                <div class="control-item">
+                    <label>
+                        Alpha (Crop Factor)
+                        <span class="control-value" id="processing-alpha-value-${cameraId}">${savedAlpha}</span>
+                    </label>
+                    <input type="range" id="processing-alpha-${cameraId}"
+                           min="0" max="1" step="0.1" value="${savedAlpha}"
+                           oninput="document.getElementById('processing-alpha-value-${cameraId}').textContent = this.value; applyProcessing('${cameraId}', true)">
+                    <small style="color: #888;">0 = crop invalid pixels, 1 = keep all pixels</small>
+                </div>
+            `;
+            // Load calibration files and restore selection
+            setTimeout(() => {
+                loadCalibrationFiles(cameraId).then(() => {
+                    const select = document.getElementById(`processing-calibration-file-${cameraId}`);
+                    if (select && savedCalibrationFile) {
+                        select.value = savedCalibrationFile;
+                    }
+                });
+            }, 100);
+            break;
+
+        case 'perspective':
+            html = `
+                <div class="control-item">
+                    <label>Source Points (x1,y1 x2,y2 x3,y3 x4,y4)</label>
+                    <input type="text" id="processing-src-points-${cameraId}"
+                           placeholder="0,0 100,0 100,100 0,100"
+                           onchange="applyProcessing('${cameraId}', true)">
+                </div>
+                <div class="control-item">
+                    <label>Destination Points (x1,y1 x2,y2 x3,y3 x4,y4)</label>
+                    <input type="text" id="processing-dst-points-${cameraId}"
+                           placeholder="0,0 100,0 100,100 0,100"
+                           onchange="applyProcessing('${cameraId}', true)">
+                </div>
+                <button class="btn btn-secondary" onclick="selectPointsInteractive('${cameraId}')" style="width: 100%; margin-top: 5px;">
+                    🎯 Select Points on Image
+                </button>
+            `;
+            break;
+
+        case 'affine':
+            html = `
+                <div class="control-item">
+                    <label>Source Points (x1,y1 x2,y2 x3,y3)</label>
+                    <input type="text" id="processing-src-points-${cameraId}"
+                           placeholder="0,0 100,0 0,100"
+                           onchange="applyProcessing('${cameraId}', true)">
+                </div>
+                <div class="control-item">
+                    <label>Destination Points (x1,y1 x2,y2 x3,y3)</label>
+                    <input type="text" id="processing-dst-points-${cameraId}"
+                           placeholder="0,0 100,0 0,100"
+                           onchange="applyProcessing('${cameraId}', true)">
+                </div>
+            `;
+            break;
+
+        case 'rotation':
+            const savedRotState = JSON.parse(localStorage.getItem('processingState') || '{}')[cameraId] || {};
+            const savedAngle = savedRotState.angle || 0;
+            const savedScale = savedRotState.scale || 1.0;
+
+            html = `
+                <div class="control-item">
+                    <label>
+                        Rotation Angle (degrees)
+                        <span class="control-value" id="processing-angle-value-${cameraId}">${savedAngle}</span>
+                    </label>
+                    <input type="range" id="processing-angle-${cameraId}"
+                           min="-180" max="180" step="1" value="${savedAngle}"
+                           oninput="document.getElementById('processing-angle-value-${cameraId}').textContent = this.value; applyProcessing('${cameraId}', true)">
+                </div>
+                <div class="control-item">
+                    <label>
+                        Scale
+                        <span class="control-value" id="processing-scale-value-${cameraId}">${savedScale}</span>
+                    </label>
+                    <input type="range" id="processing-scale-${cameraId}"
+                           min="0.1" max="3.0" step="0.1" value="${savedScale}"
+                           oninput="document.getElementById('processing-scale-value-${cameraId}').textContent = this.value; applyProcessing('${cameraId}', true)">
+                </div>
+            `;
+            break;
+
+        case 'custom_matrix':
+            html = `
+                <div class="control-item">
+                    <label>Matrix Type</label>
+                    <select id="processing-matrix-type-${cameraId}" onchange="applyProcessing('${cameraId}', true)">
+                        <option value="perspective">3x3 Perspective</option>
+                        <option value="affine">2x3 Affine</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label>Matrix Values (comma-separated)</label>
+                    <textarea id="processing-matrix-${cameraId}"
+                              rows="3"
+                              placeholder="1,0,0,0,1,0,0,0,1"
+                              style="width: 100%; font-family: monospace;"
+                              onchange="applyProcessing('${cameraId}', true)"></textarea>
+                    <small style="color: #888;">Perspective: 9 values (3x3), Affine: 6 values (2x3)</small>
+                </div>
+            `;
+            break;
+    }
+
+    paramsContainer.innerHTML = html;
+}
+
+async function loadCalibrationFiles(cameraId) {
+    try {
+        const response = await fetch('/api/calibration/sessions');
+        const data = await response.json();
+
+        const select = document.getElementById(`processing-calibration-file-${cameraId}`);
+        if (!select) return;
+
+        // Clear existing options
+        select.innerHTML = '<option value="">Select calibration...</option>';
+
+        // Get sessions array from response
+        const sessions = data.sessions || [];
+
+        // Add sessions that have calibration results
+        for (const session of sessions) {
+            if (session.calibrated) {
+                // Construct path: data/calibration/session_name/camera_id/calibration_results.json
+                const calibrationFile = `data/calibration/${session.path}/${session.camera_id}/calibration_results.json`;
+                const option = document.createElement('option');
+                option.value = calibrationFile;
+                option.textContent = `Camera ${session.camera_id} - ${session.timestamp} (${session.num_images_used || session.num_images} images, error: ${session.reprojection_error?.toFixed(4) || 'N/A'})`;
+                select.appendChild(option);
+            }
+        }
+    } catch (error) {
+        console.error('Error loading calibration files:', error);
+    }
+}
+
+async function applyProcessing(cameraId, silent = false) {
+    const enabled = document.getElementById(`processing-enable-${cameraId}`).checked;
+    if (!enabled) {
+        if (!silent) {
+            await showAlert('Processing Disabled', 'Enable processing first.');
+        }
+        return;
+    }
+
+    const type = document.getElementById(`processing-type-${cameraId}`).value;
+    const config = { type };
+
+    // Get processing state for saving
+    const processingState = JSON.parse(localStorage.getItem('processingState') || '{}');
+    processingState[cameraId] = processingState[cameraId] || {};
+    processingState[cameraId].type = type;
+
+    try {
+        switch (type) {
+            case 'undistort':
+                const calibrationFile = document.getElementById(`processing-calibration-file-${cameraId}`).value;
+                if (!calibrationFile) {
+                    if (!silent) {
+                        await showAlert('No Calibration Selected', 'Please select a calibration file.');
+                    }
+                    return;
+                }
+                config.calibration_file = calibrationFile;
+                config.alpha = parseFloat(document.getElementById(`processing-alpha-${cameraId}`).value);
+
+                // Save to localStorage
+                processingState[cameraId].calibration_file = calibrationFile;
+                processingState[cameraId].alpha = config.alpha;
+                break;
+
+            case 'perspective':
+                const srcPoints = document.getElementById(`processing-src-points-${cameraId}`).value;
+                const dstPoints = document.getElementById(`processing-dst-points-${cameraId}`).value;
+                config.src_points = parsePoints(srcPoints, 4);
+                config.dst_points = parsePoints(dstPoints, 4);
+                if (config.src_points.length !== 4 || config.dst_points.length !== 4) {
+                    if (!silent) {
+                        await showAlert('Invalid Points', 'Please provide exactly 4 points for each set.');
+                    }
+                    return;
+                }
+                break;
+
+            case 'affine':
+                const srcPointsAffine = document.getElementById(`processing-src-points-${cameraId}`).value;
+                const dstPointsAffine = document.getElementById(`processing-dst-points-${cameraId}`).value;
+                config.src_points = parsePoints(srcPointsAffine, 3);
+                config.dst_points = parsePoints(dstPointsAffine, 3);
+                if (config.src_points.length !== 3 || config.dst_points.length !== 3) {
+                    if (!silent) {
+                        await showAlert('Invalid Points', 'Please provide exactly 3 points for each set.');
+                    }
+                    return;
+                }
+                break;
+
+            case 'rotation':
+                config.angle = parseFloat(document.getElementById(`processing-angle-${cameraId}`).value);
+                config.scale = parseFloat(document.getElementById(`processing-scale-${cameraId}`).value);
+
+                // Save to localStorage
+                processingState[cameraId].angle = config.angle;
+                processingState[cameraId].scale = config.scale;
+                break;
+
+            case 'custom_matrix':
+                const matrixType = document.getElementById(`processing-matrix-type-${cameraId}`).value;
+                const matrixStr = document.getElementById(`processing-matrix-${cameraId}`).value;
+                config.matrix = matrixStr.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+
+                const expectedLength = matrixType === 'perspective' ? 9 : 6;
+                if (config.matrix.length !== expectedLength) {
+                    if (!silent) {
+                        await showAlert('Invalid Matrix', `Please provide exactly ${expectedLength} values.`);
+                    }
+                    return;
+                }
+                break;
+        }
+
+        // Send to backend
+        const response = await fetch(`/api/processing/${cameraId}/enable`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(config)
+        });
+
+        if (response.ok) {
+            // Save state after successful apply
+            localStorage.setItem('processingState', JSON.stringify(processingState));
+
+            if (!silent) {
+                await showAlert('Success', 'Processing applied successfully!');
+            }
+        } else {
+            const error = await response.json();
+            if (!silent) {
+                await showAlert('Error', error.error || 'Failed to apply processing');
+            } else {
+                console.error('Processing error:', error);
+            }
+        }
+    } catch (error) {
+        console.error('Error applying processing:', error);
+        if (!silent) {
+            await showAlert('Error', 'Failed to apply processing: ' + error.message);
+        }
+    }
+}
+
+function parsePoints(str, expectedCount) {
+    // Parse "x1,y1 x2,y2 ..." format
+    const points = [];
+    const parts = str.trim().split(/\s+/);
+
+    for (const part of parts) {
+        const coords = part.split(',').map(v => parseFloat(v.trim()));
+        if (coords.length === 2 && !isNaN(coords[0]) && !isNaN(coords[1])) {
+            points.push(coords);
+        }
+    }
+
+    return points;
+}
+
+function selectPointsInteractive(cameraId) {
+    // TODO: Implement interactive point selection on camera preview
+    showAlert('Not Implemented', 'Interactive point selection coming soon. Please enter points manually.');
+}

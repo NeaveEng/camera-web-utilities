@@ -6,7 +6,7 @@
   "white_balance": "auto",
   "saturation": 1.0,
   "edge_enhancement": 0,
-  "rotation": "rotate-180",
+  "rotation": "none",
   "stream_resolution": "1280x720",
   "capture_resolution": "1920x1080",
   "camera_name": "left",

@@ -1,9 +1,9 @@
 # GitHub Copilot Context - Camera Streaming Platform
 
-**Last Updated:** 19 November 2025  
+**Last Updated:** 20 November 2025  
 **Primary Platform:** NVIDIA Jetson Orin Nano (platform-agnostic design)  
 **Cameras:** 2x IMX477 CSI cameras (supports multiple camera models)  
-**Status:** Fully functional dual-camera streaming system with web interface and camera calibration wizard
+**Status:** Fully functional dual-camera streaming system with web interface, camera calibration wizard, and real-time image processing
 
 ---
 
@@ -52,6 +52,19 @@ A platform-agnostic Flask-based camera streaming platform designed for multiple 
   - Distortion coefficients (5 values)
   - Per-image error breakdown with visual indicators
   - Image details table with corner counts and errors
+
+#### Image Processing System (`backend/app.py`, `frontend/`)
+- **Real-time transformation:** Apply image processing to live camera streams
+- **Multiple processing types:**
+  - Undistortion using calibration data
+  - Perspective transformation (4-point)
+  - Affine transformation (3-point)
+  - Rotation with scale
+  - Custom transformation matrices
+- **Dynamic parameter control:** Real-time adjustment via web UI sliders
+- **Calibration integration:** Load saved calibration files for undistortion
+- **Processing pipeline:** Applied after calibration overlay in stream
+- **UI controls:** Toggle enable/disable, type selector, parameter inputs
 
 #### Camera Backend (`backend/camera/`)
 - **Platform abstraction:** Factory pattern with base class and platform-specific implementations
@@ -199,6 +212,41 @@ data/
 - `POST /api/calibration/undistort-image` - Generate original vs undistorted comparison
 - `POST /api/calibration/overlay/<id>/enable` - Enable ChArUco detection overlay
 - `POST /api/calibration/overlay/<id>/disable` - Disable detection overlay
+
+### Image Processing API Endpoints
+
+- `POST /api/processing/<id>/enable` - Enable image processing with configuration
+  - Body: `{"type": "undistort|perspective|affine|rotation|custom_matrix", ...params}`
+- `POST /api/processing/<id>/disable` - Disable image processing for camera
+- `POST /api/processing/<id>/update` - Update processing parameters
+  - Body: Same as enable endpoint
+
+**Processing Types:**
+
+1. **Undistort** (uses calibration data):
+   - `calibration_file`: Path to calibration.json
+   - `alpha`: Crop factor (0.0 = crop invalid pixels, 1.0 = keep all)
+   
+2. **Perspective Transform**:
+   - `src_points`: 4 source points [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+   - `dst_points`: 4 destination points in same format
+   
+3. **Affine Transform**:
+   - `src_points`: 3 source points [[x1,y1], [x2,y2], [x3,y3]]
+   - `dst_points`: 3 destination points in same format
+   
+4. **Rotation**:
+   - `angle`: Rotation angle in degrees (-180 to 180)
+   - `scale`: Scale factor (0.1 to 3.0)
+   
+5. **Custom Matrix**:
+   - `matrix`: List of 9 values (3x3 perspective) or 6 values (2x3 affine)
+
+**Implementation:**
+- Processing applied in `camera_stream()` after calibration overlay
+- Frame decoded → transformation applied → re-encoded to JPEG
+- Frontend controls integrated in camera control panel
+- Real-time parameter adjustment via sliders and inputs
 
 ### Calibration Configuration
 

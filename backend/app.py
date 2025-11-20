@@ -32,6 +32,10 @@ workflow_manager = None
 calibration_overlay_enabled = {}
 calibration_board_config = {}
 
+# Image processing state
+image_processing_enabled = {}
+image_processing_config = {}
+
 
 def initialize():
     """Initialize all backend systems."""
@@ -215,6 +219,7 @@ def camera_stream(camera_id):
     """MJPEG stream endpoint for a camera."""
     import cv2
     import numpy as np
+    from backend import calibration_utils
     
     def generate():
         """Generate MJPEG stream."""
@@ -284,6 +289,89 @@ def camera_stream(camera_id):
                         frame_jpeg = frame_jpeg.tobytes()
                 except Exception as e:
                     print(f"Error drawing calibration overlay: {e}")
+                    # Fall through to use original frame
+            
+            # Apply image processing if enabled
+            if frame_jpeg and image_processing_enabled.get(camera_id, False):
+                try:
+                    # Decode JPEG to numpy array
+                    nparr = np.frombuffer(frame_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        processing_config = image_processing_config.get(camera_id, {})
+                        processing_type = processing_config.get('type', 'undistort')
+                        
+                        if processing_type == 'undistort':
+                            # Load calibration data
+                            calibration_file = processing_config.get('calibration_file')
+                            if calibration_file and os.path.exists(calibration_file):
+                                calibration_data = calibration_utils.load_calibration(calibration_file)
+                                if calibration_data:
+                                    camera_matrix = np.array(calibration_data['camera_matrix'])
+                                    dist_coeffs = np.array(calibration_data['distortion_coeffs'])
+                                    
+                                    # Get alpha parameter (0 = crop all invalid pixels, 1 = keep all pixels)
+                                    alpha = processing_config.get('alpha', 0.0)
+                                    
+                                    # Optionally use optimal camera matrix
+                                    if alpha > 0:
+                                        h, w = frame.shape[:2]
+                                        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+                                            camera_matrix, dist_coeffs, (w, h), alpha
+                                        )
+                                        frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_matrix)
+                                    else:
+                                        frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+                        
+                        elif processing_type == 'perspective':
+                            # Apply perspective transformation
+                            src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
+                            dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
+                            
+                            if len(src_points) == 4 and len(dst_points) == 4:
+                                h, w = frame.shape[:2]
+                                matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+                                frame = cv2.warpPerspective(frame, matrix, (w, h))
+                        
+                        elif processing_type == 'affine':
+                            # Apply affine transformation
+                            src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
+                            dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
+                            
+                            if len(src_points) == 3 and len(dst_points) == 3:
+                                h, w = frame.shape[:2]
+                                matrix = cv2.getAffineTransform(src_points, dst_points)
+                                frame = cv2.warpAffine(frame, matrix, (w, h))
+                        
+                        elif processing_type == 'rotation':
+                            # Apply rotation
+                            angle = processing_config.get('angle', 0.0)
+                            scale = processing_config.get('scale', 1.0)
+                            h, w = frame.shape[:2]
+                            center = (w // 2, h // 2)
+                            matrix = cv2.getRotationMatrix2D(center, angle, scale)
+                            frame = cv2.warpAffine(frame, matrix, (w, h))
+                        
+                        elif processing_type == 'custom_matrix':
+                            # Apply custom transformation matrix
+                            matrix_data = processing_config.get('matrix', [])
+                            if len(matrix_data) == 9:  # 3x3 perspective
+                                matrix = np.array(matrix_data, dtype=np.float32).reshape(3, 3)
+                                h, w = frame.shape[:2]
+                                frame = cv2.warpPerspective(frame, matrix, (w, h))
+                            elif len(matrix_data) == 6:  # 2x3 affine
+                                matrix = np.array(matrix_data, dtype=np.float32).reshape(2, 3)
+                                h, w = frame.shape[:2]
+                                frame = cv2.warpAffine(frame, matrix, (w, h))
+                        
+                        # Re-encode to JPEG
+                        _, frame_jpeg = cv2.imencode('.jpg', frame)
+                        frame_jpeg = frame_jpeg.tobytes()
+                except Exception as e:
+                    print(f"Error applying image processing: {e}")
+                    import traceback
+                    traceback.print_exc()
                     # Fall through to use original frame
             
             if frame_jpeg:
@@ -1263,13 +1351,40 @@ def list_calibration_sessions():
                                  glob.glob(os.path.join(camera_dir, '*.png'))
                     image_count = len(image_files)
                     
+                    # Check if calibration results exist
+                    calibration_file = os.path.join(camera_dir, 'calibration_results.json')
+                    calibrated = os.path.exists(calibration_file)
+                    
+                    # Load calibration data if it exists
+                    reprojection_error = None
+                    num_images_used = None
+                    if calibrated:
+                        try:
+                            import json
+                            with open(calibration_file, 'r') as f:
+                                calib_data = json.load(f)
+                                reprojection_error = calib_data.get('reprojection_error')
+                                num_images_used = calib_data.get('num_images_used')
+                        except:
+                            pass
+                    
                     if image_count > 0:  # Only include sessions with images
-                        sessions.append({
+                        session_info = {
                             'path': session_name,
                             'camera_id': camera_id,
                             'date': date_str,
-                            'image_count': image_count
-                        })
+                            'image_count': image_count,
+                            'num_images': image_count,
+                            'calibrated': calibrated,
+                            'timestamp': date_str
+                        }
+                        
+                        if reprojection_error is not None:
+                            session_info['reprojection_error'] = reprojection_error
+                        if num_images_used is not None:
+                            session_info['num_images_used'] = num_images_used
+                        
+                        sessions.append(session_info)
             except Exception as e:
                 print(f"Error processing session {session_dir}: {e}")
                 continue
@@ -1573,6 +1688,77 @@ def undistort_image_endpoint():
     except Exception as e:
         import traceback
         traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/processing/<camera_id>/enable', methods=['POST'])
+def enable_image_processing(camera_id):
+    """Enable image processing for a camera with configuration."""
+    try:
+        config = request.json or {}
+        
+        # Add minimal debug logging
+        print(f"Enabling {config.get('type', 'unknown')} processing for camera {camera_id}")
+        
+        image_processing_enabled[camera_id] = True
+        image_processing_config[camera_id] = config
+        
+        return jsonify({
+            'success': True,
+            'message': f'Image processing enabled for camera {camera_id}',
+            'config': config
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/processing/<camera_id>/disable', methods=['POST'])
+def disable_image_processing(camera_id):
+    """Disable image processing for a camera."""
+    try:
+        image_processing_enabled[camera_id] = False
+        if camera_id in image_processing_config:
+            del image_processing_config[camera_id]
+        
+        return jsonify({
+            'success': True,
+            'message': f'Image processing disabled for camera {camera_id}'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/processing/<camera_id>/update', methods=['POST'])
+def update_image_processing(camera_id):
+    """Update image processing configuration."""
+    try:
+        data = request.json
+        config = data.get('config', {})
+        
+        if camera_id in image_processing_config:
+            image_processing_config[camera_id].update(config)
+        else:
+            image_processing_config[camera_id] = config
+        
+        return jsonify({
+            'success': True,
+            'config': image_processing_config[camera_id]
+        })
+        
+    except Exception as e:
         return jsonify({
             'success': False,
             'error': str(e)
