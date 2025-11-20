@@ -3,7 +3,62 @@
 **Last Updated:** 20 November 2025  
 **Primary Platform:** NVIDIA Jetson Orin Nano (platform-agnostic design)  
 **Cameras:** 2x IMX477 CSI cameras (supports multiple camera models)  
-**Status:** Fully functional dual-camera streaming system with web interface, camera calibration wizard, and real-time image processing
+**Status:** Fully functional dual-camera streaming system with web interface, camera calibration wizard, real-time image processing, and panorama calibration with synchronized dual-camera capture
+
+---
+
+## 🚧 ACTIVE WORK - Panorama Calibration Session Loading (20 Nov 2025)
+
+### Current Issue
+Session dropdown in panorama calibration wizard not populating with existing sessions after implementing session persistence.
+
+### What's Working
+✅ Composite preview stream with side-by-side cameras (1280x360 total: 640x360 per camera)
+✅ Hardware synchronization (<16ms frame sync via single GStreamer pipeline)
+✅ Text overlays for camera identification ("Camera 0", "Camera 1" in green)
+✅ 16:9 aspect ratio matching full-res (640x360 preview matches 1920x1080 ratio)
+✅ Session persistence to disk with proper directory structure
+✅ Image capture saves to data/calibration/panorama_YYYYMMDD_HHMMSS/{0,1}/
+✅ Session metadata (session_info.json) stores camera pair and timestamps
+✅ Updated /api/calibration/sessions endpoint to detect panorama sessions
+
+### What's Being Debugged
+❌ Session dropdown not showing existing sessions in UI
+❌ JavaScript loadPanoramaSessions() may not be filtering correctly
+❌ Potential mismatch between old session format (0_1_timestamp) and new format (panorama_*)
+
+### Session Format Evolution
+- **New format:** `panorama_YYYYMMDD_HHMMSS/` with subdirectories `0/` and `1/`
+- **Old format:** `0_1_1763667668575/` (timestamp-based) - needs backward compatibility
+- **Detection:** Backend now checks for `session_info.json` to identify old panorama sessions
+- **API:** Returns all sessions, frontend filters for panorama_* (may need client-side fix)
+
+### Files Modified for Panorama
+1. `backend/camera/sync_pair.py`: Composite pipeline with compositor element
+2. `backend/app.py`: Session persistence, calibration loading fixes, panorama endpoints
+3. `frontend/index.html`: Two-column layout, session selector dropdown
+4. `frontend/app.js`: loadPanoramaSessions(), session selection handlers
+5. `frontend/style.css`: panorama-grid layout
+
+### Next Steps for Tomorrow
+1. Restart server and test /api/calibration/sessions endpoint with curl
+2. Check if endpoint returns all 3 existing sessions (including 0_1_1763667668575)
+3. Debug JavaScript console for errors in loadPanoramaSessions()
+4. Fix client-side filtering to include old-format sessions (check for session_info.json)
+5. Fix separate issue: calibration_utils import error in camera stream code
+
+### Existing Sessions on Disk
+- `session_20251119_190310` (unknown type - check session_info.json)
+- `session_20251120_155650` (unknown type - check session_info.json)
+- `0_1_1763667668575` (old panorama format with session_info.json confirmed)
+
+### API Endpoints for Panorama
+- `GET /api/calibration/sessions` - Lists all calibration sessions (panorama and single-camera)
+- `POST /api/calibration/panorama/capture` - Capture synchronized image pair
+- `POST /api/calibration/panorama/compute` - Compute stereo calibration from session
+- `POST /api/calibration/panorama/stitch` - Generate panorama from calibrated pair
+
+---
 
 ---
 

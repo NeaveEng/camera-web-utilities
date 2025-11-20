@@ -6,14 +6,17 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_cors import CORS
 from pathlib import Path
 import os
+import json
 import threading
 import time
 
 from backend.camera.factory import get_camera_backend, detect_platform
 from backend.camera.groups import CameraGroupManager
+from backend.camera.sync_pair import SynchronizedPairManager
 from backend.features.manager import FeatureManager
 from backend.workflows.manager import WorkflowManager
 from backend.calibration_utils import calibrate_camera_from_session, save_calibration_results
+from backend.panorama_utils import calibrate_panorama_pair, save_panorama_calibration, load_panorama_calibration, stitch_images
 
 
 # Initialize Flask app
@@ -25,6 +28,7 @@ CORS(app)
 # Initialize managers
 camera_backend = None
 group_manager = None
+sync_pair_manager = None
 feature_manager = None
 workflow_manager = None
 
@@ -39,7 +43,7 @@ image_processing_config = {}
 
 def initialize():
     """Initialize all backend systems."""
-    global camera_backend, group_manager, feature_manager, workflow_manager
+    global camera_backend, group_manager, sync_pair_manager, feature_manager, workflow_manager
     
     print("Detecting platform...")
     platform = detect_platform()
@@ -50,6 +54,9 @@ def initialize():
     
     print("Initializing group manager...")
     group_manager = CameraGroupManager()
+    
+    print("Initializing synchronized pair manager...")
+    sync_pair_manager = SynchronizedPairManager()
     
     print("Initializing feature manager...")
     feature_manager = FeatureManager()
@@ -216,91 +223,107 @@ def stop_camera(camera_id):
 
 @app.route('/api/cameras/<camera_id>/stream')
 def camera_stream(camera_id):
-    """MJPEG stream endpoint for a camera."""
+    """MJPEG stream endpoint for a camera. Checks synchronized pairs first."""
     import cv2
     import numpy as np
     from backend import calibration_utils
     
+    print(f"[Stream] Stream requested for camera {camera_id}")
+    
     def generate():
         """Generate MJPEG stream."""
-        while camera_backend.is_streaming(camera_id):
-            frame_jpeg = camera_backend.get_preview_frame(camera_id)
-            
-            # If calibration overlay is enabled, decode, draw markers, re-encode
-            if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
-                try:
-                    # Decode JPEG to numpy array
-                    nparr = np.frombuffer(frame_jpeg, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if frame is not None:
-                        # Get calibration plugin
-                        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
-                        if calibration_plugin:
-                            # Configure board if needed
-                            board_config = calibration_board_config.get(camera_id, {})
-                            if board_config:
-                                calibration_plugin.configure_board(
-                                    width=board_config.get('width', 8),
-                                    height=board_config.get('height', 5),
-                                    square_length=board_config.get('square_length', 50.0),
-                                    marker_length=board_config.get('marker_length', 37.0),
-                                    dictionary=board_config.get('dictionary', 'DICT_6X6_100')
-                                )
-                            
-                            # Detect pattern directly on preview frame (faster)
-                            detection = calibration_plugin.detect_charuco_pattern(frame)
-                            
-                            # Draw markers on preview frame
-                            if detection.get('detected'):
-                                try:
-                                    # Draw ArUco markers using OpenCV's built-in function
-                                    if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
-                                        marker_corners = detection['marker_corners']
-                                        marker_ids = detection['marker_ids']
+        # Check if this camera is part of a synchronized pair
+        sync_pair = None
+        for pair in sync_pair_manager.get_all_pairs().values():
+            if pair.is_streaming(camera_id):
+                sync_pair = pair
+                print(f"[Stream] Camera {camera_id} found in synchronized pair")
+                break
+        
+        if sync_pair is None:
+            print(f"[Stream] Camera {camera_id} NOT in synchronized pair, checking regular backend")
+        
+        # Use appropriate backend
+        if sync_pair:
+            # Camera is in a synchronized pair - use pair's preview
+            while sync_pair.is_streaming(camera_id):
+                frame_jpeg = sync_pair.get_preview_frame(camera_id)
+                
+                # If calibration overlay is enabled, decode, draw markers, re-encode
+                if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
+                    try:
+                        # Decode JPEG to numpy array
+                        nparr = np.frombuffer(frame_jpeg, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if frame is not None:
+                            # Get calibration plugin
+                            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+                            if calibration_plugin:
+                                # Configure board if needed
+                                board_config = calibration_board_config.get(camera_id, {})
+                                if board_config:
+                                    calibration_plugin.configure_board(
+                                        width=board_config.get('width', 8),
+                                        height=board_config.get('height', 5),
+                                        square_length=board_config.get('square_length', 50.0),
+                                        marker_length=board_config.get('marker_length', 37.0),
+                                        dictionary=board_config.get('dictionary', 'DICT_6X6_100')
+                                    )
+                                
+                                # Detect pattern directly on preview frame (faster)
+                                detection = calibration_plugin.detect_charuco_pattern(frame)
+                                
+                                # Draw markers on preview frame
+                                if detection.get('detected'):
+                                    try:
+                                        # Draw ArUco markers using OpenCV's built-in function
+                                        if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
+                                            marker_corners = detection['marker_corners']
+                                            marker_ids = detection['marker_ids']
+                                            
+                                            # Draw detected markers directly (no scaling needed)
+                                            cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
                                         
-                                        # Draw detected markers directly (no scaling needed)
-                                        cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
-                                    
-                                    # Draw ChArUco corners
-                                    if detection.get('charuco_corners_array') is not None:
-                                        corners = detection['charuco_corners_array']
-                                        # Reshape to ensure it's 2D array of points
-                                        if corners.ndim == 3:
-                                            corners = corners.reshape(-1, 2)
-                                        for corner in corners:
-                                            # Extract x, y and convert to Python scalars (no scaling needed)
-                                            x = int(corner.flatten()[0])
-                                            y = int(corner.flatten()[1])
-                                            cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
-                                    
-                                    # Draw info overlay
-                                    info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
-                                    cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
-                                    cv2.putText(frame, info_text, (10, 25),
-                                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                                except Exception as draw_error:
+                                        # Draw ChArUco corners
+                                        if detection.get('charuco_corners_array') is not None:
+                                            corners = detection['charuco_corners_array']
+                                            # Reshape to ensure it's 2D array of points
+                                            if corners.ndim == 3:
+                                                corners = corners.reshape(-1, 2)
+                                            for corner in corners:
+                                                # Extract x, y and convert to Python scalars (no scaling needed)
+                                                x = int(corner.flatten()[0])
+                                                y = int(corner.flatten()[1])
+                                                cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
+                                        
+                                        # Draw info overlay
+                                        info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
+                                        cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
+                                        cv2.putText(frame, info_text, (10, 25),
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    except Exception as draw_error:
                                         import traceback
                                         print(f"Error drawing calibration overlay: {draw_error}")
                                         traceback.print_exc()
                         
-                        # Re-encode to JPEG
-                        _, frame_jpeg = cv2.imencode('.jpg', frame)
-                        frame_jpeg = frame_jpeg.tobytes()
-                except Exception as e:
-                    print(f"Error drawing calibration overlay: {e}")
-                    # Fall through to use original frame
-            
-            # Apply image processing if enabled
-            if frame_jpeg and image_processing_enabled.get(camera_id, False):
-                try:
-                    # Decode JPEG to numpy array
-                    nparr = np.frombuffer(frame_jpeg, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    
-                    if frame is not None:
-                        processing_config = image_processing_config.get(camera_id, {})
-                        processing_type = processing_config.get('type', 'undistort')
+                            # Re-encode to JPEG
+                            _, frame_jpeg = cv2.imencode('.jpg', frame)
+                            frame_jpeg = frame_jpeg.tobytes()
+                    except Exception as e:
+                        print(f"Error drawing calibration overlay: {e}")
+                        # Fall through to use original frame
+                
+                # Apply image processing if enabled
+                if frame_jpeg and image_processing_enabled.get(camera_id, False):
+                    try:
+                        # Decode JPEG to numpy array
+                        nparr = np.frombuffer(frame_jpeg, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if frame is not None:
+                            processing_config = image_processing_config.get(camera_id, {})
+                            processing_type = processing_config.get('type', 'undistort')
                         
                         if processing_type == 'undistort':
                             # Load calibration data
@@ -375,20 +398,188 @@ def camera_stream(camera_id):
                                 matrix = np.array(matrix_data, dtype=np.float32).reshape(2, 3)
                                 h, w = frame.shape[:2]
                                 frame = cv2.warpAffine(frame, matrix, (w, h))
+                            
+                            # Re-encode to JPEG
+                            _, frame_jpeg = cv2.imencode('.jpg', frame)
+                            frame_jpeg = frame_jpeg.tobytes()
+                    except Exception as e:
+                        print(f"Error applying image processing: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fall through to use original frame
+                
+                if frame_jpeg:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
+                time.sleep(0.033)  # ~30 FPS
+        else:
+            # Camera not in synchronized pair - use regular backend
+            while camera_backend.is_streaming(camera_id):
+                frame_jpeg = camera_backend.get_preview_frame(camera_id)
+                
+                # If calibration overlay is enabled, decode, draw markers, re-encode
+                if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
+                    try:
+                        # Decode JPEG to numpy array
+                        nparr = np.frombuffer(frame_jpeg, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         
-                        # Re-encode to JPEG
-                        _, frame_jpeg = cv2.imencode('.jpg', frame)
-                        frame_jpeg = frame_jpeg.tobytes()
-                except Exception as e:
-                    print(f"Error applying image processing: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fall through to use original frame
-            
-            if frame_jpeg:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
-            time.sleep(0.033)  # ~30 FPS
+                        if frame is not None:
+                            # Get calibration plugin
+                            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+                            if calibration_plugin:
+                                # Configure board if needed
+                                board_config = calibration_board_config.get(camera_id, {})
+                                if board_config:
+                                    calibration_plugin.configure_board(
+                                        width=board_config.get('width', 8),
+                                        height=board_config.get('height', 5),
+                                        square_length=board_config.get('square_length', 50.0),
+                                        marker_length=board_config.get('marker_length', 37.0),
+                                        dictionary=board_config.get('dictionary', 'DICT_6X6_100')
+                                    )
+                                
+                                # Detect pattern directly on preview frame (faster)
+                                detection = calibration_plugin.detect_charuco_pattern(frame)
+                                
+                                # Draw markers on preview frame
+                                if detection.get('detected'):
+                                    try:
+                                        # Draw ArUco markers using OpenCV's built-in function
+                                        if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
+                                            marker_corners = detection['marker_corners']
+                                            marker_ids = detection['marker_ids']
+                                            
+                                            # Draw detected markers directly (no scaling needed)
+                                            cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
+                                        
+                                        # Draw ChArUco corners
+                                        if detection.get('charuco_corners_array') is not None:
+                                            corners = detection['charuco_corners_array']
+                                            # Reshape to ensure it's 2D array of points
+                                            if corners.ndim == 3:
+                                                corners = corners.reshape(-1, 2)
+                                            for corner in corners:
+                                                # Extract x, y and convert to Python scalars (no scaling needed)
+                                                x = int(corner.flatten()[0])
+                                                y = int(corner.flatten()[1])
+                                                cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
+                                        
+                                        # Draw info overlay
+                                        info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
+                                        cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
+                                        cv2.putText(frame, info_text, (10, 25),
+                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                    except Exception as draw_error:
+                                            import traceback
+                                            print(f"Error drawing calibration overlay: {draw_error}")
+                                            traceback.print_exc()
+                            
+                            # Re-encode to JPEG
+                            _, frame_jpeg = cv2.imencode('.jpg', frame)
+                            frame_jpeg = frame_jpeg.tobytes()
+                    except Exception as e:
+                        print(f"Error drawing calibration overlay: {e}")
+                        # Fall through to use original frame
+                
+                # Apply image processing if enabled
+                if frame_jpeg and image_processing_enabled.get(camera_id, False):
+                    try:
+                        # Decode JPEG to numpy array
+                        nparr = np.frombuffer(frame_jpeg, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        
+                        if frame is not None:
+                            processing_config = image_processing_config.get(camera_id, {})
+                            processing_type = processing_config.get('type', 'undistort')
+                            
+                            if processing_type == 'undistort':
+                                # Load calibration data
+                                calibration_file = processing_config.get('calibration_file')
+                                if calibration_file and os.path.exists(calibration_file):
+                                    calibration_data = calibration_utils.load_calibration(calibration_file)
+                                    if calibration_data:
+                                        camera_matrix = np.array(calibration_data['camera_matrix'])
+                                        dist_coeffs = np.array(calibration_data['distortion_coeffs'])
+                                        
+                                        # Scale calibration for preview resolution
+                                        # Calibration is done at full resolution, but preview is lower resolution
+                                        h, w = frame.shape[:2]
+                                        original_size = tuple(calibration_data.get('image_size', [w, h]))
+                                        target_size = (w, h)
+                                        
+                                        # Only scale if resolutions differ
+                                        if original_size != target_size:
+                                            camera_matrix, dist_coeffs = calibration_utils.scale_calibration_for_resolution(
+                                                camera_matrix, dist_coeffs, original_size, target_size
+                                            )
+                                        
+                                        # Get alpha parameter (0 = crop all invalid pixels, 1 = keep all pixels)
+                                        alpha = processing_config.get('alpha', 0.0)
+                                        
+                                        # Optionally use optimal camera matrix
+                                        if alpha > 0:
+                                            new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+                                                camera_matrix, dist_coeffs, (w, h), alpha
+                                            )
+                                            frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_matrix)
+                                        else:
+                                            frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+                            
+                            elif processing_type == 'perspective':
+                                # Apply perspective transformation
+                                src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
+                                dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
+                                
+                                if len(src_points) == 4 and len(dst_points) == 4:
+                                    h, w = frame.shape[:2]
+                                    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+                                    frame = cv2.warpPerspective(frame, matrix, (w, h))
+                            
+                            elif processing_type == 'affine':
+                                # Apply affine transformation
+                                src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
+                                dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
+                                
+                                if len(src_points) == 3 and len(dst_points) == 3:
+                                    h, w = frame.shape[:2]
+                                    matrix = cv2.getAffineTransform(src_points, dst_points)
+                                    frame = cv2.warpAffine(frame, matrix, (w, h))
+                            
+                            elif processing_type == 'rotation':
+                                # Apply rotation
+                                angle = processing_config.get('angle', 0.0)
+                                scale = processing_config.get('scale', 1.0)
+                                h, w = frame.shape[:2]
+                                center = (w // 2, h // 2)
+                                matrix = cv2.getRotationMatrix2D(center, angle, scale)
+                                frame = cv2.warpAffine(frame, matrix, (w, h))
+                            
+                            elif processing_type == 'custom_matrix':
+                                # Apply custom transformation matrix
+                                matrix_data = processing_config.get('matrix', [])
+                                if len(matrix_data) == 9:  # 3x3 perspective
+                                    matrix = np.array(matrix_data, dtype=np.float32).reshape(3, 3)
+                                    h, w = frame.shape[:2]
+                                    frame = cv2.warpPerspective(frame, matrix, (w, h))
+                                elif len(matrix_data) == 6:  # 2x3 affine
+                                    matrix = np.array(matrix_data, dtype=np.float32).reshape(2, 3)
+                                    h, w = frame.shape[:2]
+                                    frame = cv2.warpAffine(frame, matrix, (w, h))
+                            
+                            # Re-encode to JPEG
+                            _, frame_jpeg = cv2.imencode('.jpg', frame)
+                            frame_jpeg = frame_jpeg.tobytes()
+                    except Exception as e:
+                        print(f"Error applying image processing: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fall through to use original frame
+                
+                if frame_jpeg:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
+                time.sleep(0.033)  # ~30 FPS
     
     return Response(generate(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -1333,17 +1524,30 @@ def list_calibration_sessions():
         import glob
         from datetime import datetime
         
-        # Get all calibration session directories
+        # Get all calibration session directories (both regular and panorama sessions)
         calibration_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'calibration')
         session_dirs = glob.glob(os.path.join(calibration_dir, 'session_*'))
+        panorama_dirs = glob.glob(os.path.join(calibration_dir, 'panorama_*'))
+        
+        # Also check for old-format panorama sessions (camera_id pairs like "0_1_timestamp")
+        # These have session_info.json at the root level
+        all_dirs = glob.glob(os.path.join(calibration_dir, '*'))
+        for dir_path in all_dirs:
+            if os.path.isdir(dir_path) and dir_path not in session_dirs and dir_path not in panorama_dirs:
+                # Check if it has session_info.json (indicates panorama session)
+                session_info_path = os.path.join(dir_path, 'session_info.json')
+                if os.path.exists(session_info_path):
+                    panorama_dirs.append(dir_path)
+        
+        all_session_dirs = session_dirs + panorama_dirs
         
         sessions = []
-        for session_dir in sorted(session_dirs, reverse=True):  # Most recent first
+        for session_dir in sorted(all_session_dirs, reverse=True):  # Most recent first
             try:
                 session_name = os.path.basename(session_dir)
                 
-                # Parse timestamp from session name (format: session_YYYYMMDD_HHMMSS)
-                timestamp_str = session_name.replace('session_', '')
+                # Parse timestamp from session name (format: session_YYYYMMDD_HHMMSS or panorama_YYYYMMDD_HHMMSS)
+                timestamp_str = session_name.replace('session_', '').replace('panorama_', '')
                 try:
                     timestamp = datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
                     date_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
@@ -1400,9 +1604,14 @@ def list_calibration_sessions():
                 print(f"Error processing session {session_dir}: {e}")
                 continue
         
+        # Also create a simple list of unique session names for dropdowns
+        session_names = list(set([s['path'] for s in sessions]))
+        session_names.sort(reverse=True)
+        
         return jsonify({
             'success': True,
-            'sessions': sessions
+            'sessions': session_names,  # Simple list for dropdown
+            'session_details': sessions  # Detailed info for session management
         })
         
     except Exception as e:
@@ -1948,6 +2157,457 @@ def serve_static(path):
 
 
 # ============================================================================
+# Panorama Calibration Endpoints
+# ============================================================================
+
+# Store panorama session data in memory
+panorama_sessions = {}
+
+@app.route('/api/calibration/panorama/check-detection', methods=['POST'])
+def panorama_check_detection():
+    """
+    Check if ChArUco board is detected in both cameras without capturing.
+    Uses hardware-synchronized camera pair for accurate frame sync.
+    """
+    try:
+        data = request.json
+        camera1_id = data.get('camera1_id')
+        camera2_id = data.get('camera2_id')
+        board_config = data.get('board_config')
+        
+        if not camera1_id or not camera2_id or not board_config:
+            return jsonify({'success': False, 'error': 'Missing required parameters'}), 400
+        
+        # Get or create synchronized pair
+        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        if sync_pair is None:
+            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            sync_pair.start()
+        
+        # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
+        sync_result = sync_pair.get_synchronized_frames(max_time_diff=0.016)
+        
+        if sync_result is None:
+            # Frames not ready or not synchronized yet - this is normal during startup
+            return jsonify({
+                'success': True,
+                'detected_both': False,
+                'detected_cam1': False,
+                'detected_cam2': False,
+                'corners_cam1': 0,
+                'corners_cam2': 0,
+                'synchronized': False,
+                'waiting_for_frames': True
+            })
+        
+        frame1, frame2, avg_timestamp = sync_result
+        
+        # Quick detection check
+        from backend.panorama_utils import detect_charuco_for_panorama
+        detection1 = detect_charuco_for_panorama(frame1, board_config)
+        detection2 = detect_charuco_for_panorama(frame2, board_config)
+        
+        detected_both = detection1 is not None and detection2 is not None
+        
+        return jsonify({
+            'success': True,
+            'detected_both': detected_both,
+            'detected_cam1': detection1 is not None,
+            'detected_cam2': detection2 is not None,
+            'corners_cam1': detection1['num_corners'] if detection1 else 0,
+            'corners_cam2': detection2['num_corners'] if detection2 else 0,
+            'synchronized': True,
+            'waiting_for_frames': False
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/capture', methods=['POST'])
+def panorama_capture():
+    """
+    Capture single image pair and add to panorama session.
+    Uses hardware-synchronized camera pair for accurate frame sync.
+    Images are saved to disk in session directory.
+    """
+    try:
+        import cv2
+        from datetime import datetime
+        
+        data = request.json
+        camera1_id = data.get('camera1_id')
+        camera2_id = data.get('camera2_id')
+        board_config = data.get('board_config')
+        session_id = data.get('session_id')
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        if not board_config:
+            return jsonify({'success': False, 'error': 'Board configuration required'}), 400
+        
+        # Get or create synchronized pair
+        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        if sync_pair is None:
+            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            sync_pair.start()
+        
+        # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
+        sync_result = sync_pair.get_synchronized_frames(max_time_diff=0.016)
+        
+        if sync_result is None:
+            return jsonify({'success': False, 'error': 'Failed to get synchronized frames'}), 500
+        
+        frame1, frame2, avg_timestamp = sync_result
+        
+        # Initialize session if needed
+        if not session_id:
+            session_id = f"panorama_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        if session_id not in panorama_sessions:
+            # Create session directory
+            session_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'calibration', session_id)
+            os.makedirs(session_dir, exist_ok=True)
+            
+            # Save session metadata
+            metadata_file = os.path.join(session_dir, 'session_info.json')
+            metadata = {
+                'session_id': session_id,
+                'camera1_id': camera1_id,
+                'camera2_id': camera2_id,
+                'board_config': board_config,
+                'created_at': datetime.now().isoformat()
+            }
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            panorama_sessions[session_id] = {
+                'camera1_id': camera1_id,
+                'camera2_id': camera2_id,
+                'board_config': board_config,
+                'image_pairs': [],
+                'capture_count': 0,
+                'session_dir': session_dir
+            }
+        
+        session = panorama_sessions[session_id]
+        session['capture_count'] += 1
+        capture_num = session['capture_count']
+        
+        # Save images to disk
+        cam1_dir = os.path.join(session['session_dir'], camera1_id)
+        cam2_dir = os.path.join(session['session_dir'], camera2_id)
+        os.makedirs(cam1_dir, exist_ok=True)
+        os.makedirs(cam2_dir, exist_ok=True)
+        
+        cam1_filename = f"image_{capture_num:04d}.jpg"
+        cam2_filename = f"image_{capture_num:04d}.jpg"
+        cam1_path = os.path.join(cam1_dir, cam1_filename)
+        cam2_path = os.path.join(cam2_dir, cam2_filename)
+        
+        cv2.imwrite(cam1_path, frame1)
+        cv2.imwrite(cam2_path, frame2)
+        
+        # Also keep in memory for immediate processing
+        session['image_pairs'].append((frame1.copy(), frame2.copy()))
+        
+        # Quick validation - detect board in both images
+        from backend.panorama_utils import detect_charuco_for_panorama, match_charuco_corners
+        detection1 = detect_charuco_for_panorama(frame1, board_config)
+        detection2 = detect_charuco_for_panorama(frame2, board_config)
+        
+        detected_both = detection1 is not None and detection2 is not None
+        matches = 0
+        
+        if detected_both:
+            try:
+                points1, points2 = match_charuco_corners(detection1, detection2)
+                matches = len(points1)
+            except:
+                pass
+        
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'capture_count': capture_num,
+            'detected_both': detected_both,
+            'matches': matches,
+            'corners_cam1': detection1['num_corners'] if detection1 else 0,
+            'corners_cam2': detection2['num_corners'] if detection2 else 0,
+            'cam1_path': cam1_path,
+            'cam2_path': cam2_path
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/compute', methods=['POST'])
+def panorama_compute():
+    """
+    Compute panorama homography from all captured image pairs in session.
+    """
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        use_calibration = data.get('use_calibration', True)
+        
+        if not session_id or session_id not in panorama_sessions:
+            return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
+        
+        session = panorama_sessions[session_id]
+        
+        if len(session['image_pairs']) == 0:
+            return jsonify({'success': False, 'error': 'No images captured in session'}), 400
+        
+        # Load individual calibrations if requested
+        cam1_calib = None
+        cam2_calib = None
+        
+        if use_calibration:
+            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+            if calibration_plugin:
+                try:
+                    # Try to load calibration for each camera
+                    cam1_result = calibration_plugin.load_calibration(f"camera_{session['camera1_id']}")
+                    if cam1_result.get('success'):
+                        cam1_calib = {
+                            'camera_matrix': np.array(cam1_result['camera_matrix']),
+                            'distortion_coeffs': np.array(cam1_result['distortion_coeffs'])
+                        }
+                    
+                    cam2_result = calibration_plugin.load_calibration(f"camera_{session['camera2_id']}")
+                    if cam2_result.get('success'):
+                        cam2_calib = {
+                            'camera_matrix': np.array(cam2_result['camera_matrix']),
+                            'distortion_coeffs': np.array(cam2_result['distortion_coeffs'])
+                        }
+                except Exception as e:
+                    print(f"Warning: Could not load camera calibrations: {e}")
+        
+        # Run panorama calibration with all captures
+        from backend.panorama_utils import calibrate_panorama_multiple
+        result = calibrate_panorama_multiple(
+            session['image_pairs'],
+            session['board_config'],
+            cam1_calib,
+            cam2_calib
+        )
+        
+        if result['success']:
+            # Save calibration
+            save_path = save_panorama_calibration(
+                result,
+                session['camera1_id'],
+                session['camera2_id']
+            )
+            result['save_path'] = save_path
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/reset', methods=['POST'])
+def panorama_reset():
+    """Reset panorama calibration session."""
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        
+        if session_id and session_id in panorama_sessions:
+            del panorama_sessions[session_id]
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/init-pair', methods=['POST'])
+def panorama_init_pair():
+    """Initialize synchronized camera pair for panorama preview."""
+    try:
+        data = request.json
+        camera1_id = data.get('camera1_id')
+        camera2_id = data.get('camera2_id')
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        # Get or create synchronized pair
+        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        if sync_pair is None:
+            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            started = sync_pair.start()
+            
+            if not started:
+                return jsonify({'success': False, 'error': 'Failed to start synchronized pair'}), 500
+        
+        return jsonify({
+            'success': True,
+            'synchronized': True,
+            'message': 'Synchronized camera pair initialized'
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/load', methods=['GET'])
+def panorama_load():
+    """Load existing panorama calibration between two cameras."""
+    try:
+        camera1_id = request.args.get('camera1_id')
+        camera2_id = request.args.get('camera2_id')
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        calibration = load_panorama_calibration(camera1_id, camera2_id)
+        
+        if calibration is None:
+            return jsonify({
+                'success': False,
+                'error': f'No panorama calibration found for {camera1_id} and {camera2_id}'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'calibration': calibration
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/stitch', methods=['POST'])
+def panorama_stitch():
+    """
+    Apply panorama calibration to stitch current camera feeds.
+    Uses hardware-synchronized frames for accurate stitching.
+    """
+    try:
+        data = request.json
+        camera1_id = data.get('camera1_id')
+        camera2_id = data.get('camera2_id')
+        blend_width = data.get('blend_width', 50)
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        # Load panorama calibration
+        calibration = load_panorama_calibration(camera1_id, camera2_id)
+        
+        if calibration is None:
+            return jsonify({'success': False, 'error': 'No calibration found'}), 404
+        
+        # Get homography matrix
+        import numpy as np
+        H = np.array(calibration['calibration']['homography'])
+        
+        # Get or create synchronized pair
+        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        if sync_pair is None:
+            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            sync_pair.start()
+        
+        # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
+        sync_result = sync_pair.get_synchronized_frames(max_time_diff=0.016)
+        
+        if sync_result is None:
+            return jsonify({'success': False, 'error': 'Failed to get synchronized frames'}), 500
+        
+        frame1, frame2, avg_timestamp = sync_result
+        
+        # Apply individual calibrations if available
+        cam1_calib = None
+        cam2_calib = None
+        
+        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+        if calibration_plugin:
+            try:
+                # Try to load calibration for each camera
+                cam1_result = calibration_plugin.load_calibration(f"camera_{camera1_id}")
+                if cam1_result.get('success'):
+                    cam1_calib = {
+                        'camera_matrix': np.array(cam1_result['camera_matrix']),
+                        'dist_coeffs': np.array(cam1_result['distortion_coeffs'])
+                    }
+                
+                cam2_result = calibration_plugin.load_calibration(f"camera_{camera2_id}")
+                if cam2_result.get('success'):
+                    cam2_calib = {
+                        'camera_matrix': np.array(cam2_result['camera_matrix']),
+                        'dist_coeffs': np.array(cam2_result['distortion_coeffs'])
+                    }
+            except Exception as e:
+                print(f"Warning: Could not load camera calibrations: {e}")
+        
+        if cam1_calib:
+            import cv2
+            frame1 = cv2.undistort(frame1, cam1_calib['camera_matrix'], cam1_calib['dist_coeffs'])
+        
+        if cam2_calib:
+            import cv2
+            frame2 = cv2.undistort(frame2, cam2_calib['camera_matrix'], cam2_calib['dist_coeffs'])
+        
+        # Stitch images
+        stitched = stitch_images(frame1, frame2, H, blend_width)
+        
+        # Encode as JPEG
+        import cv2
+        _, buffer = cv2.imencode('.jpg', stitched, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        
+        # Return as base64
+        import base64
+        image_base64 = base64.b64encode(buffer).decode('utf-8')
+        
+        return jsonify({
+            'success': True,
+            'image': f'data:image/jpeg;base64,{image_base64}',
+            'width': stitched.shape[1],
+            'height': stitched.shape[0]
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# Stereo Calibration Placeholder
+# ============================================================================
+
+@app.route('/api/calibration/stereo/info', methods=['GET'])
+def stereo_info():
+    """Placeholder for future stereo calibration feature."""
+    return jsonify({
+        'available': False,
+        'message': 'Stereo calibration for depth/3D reconstruction coming soon',
+        'features': [
+            'Simultaneous ChArUco board detection',
+            'Epipolar geometry computation',
+            'Rectification for depth mapping',
+            'Disparity map generation'
+        ]
+    })
+
+
+# ============================================================================
 # Application Startup
 # ============================================================================
 
@@ -1957,3 +2617,4 @@ if __name__ == '__main__':
     
     # Run Flask app
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+

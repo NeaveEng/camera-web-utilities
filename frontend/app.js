@@ -3246,6 +3246,7 @@ function finishCalibration() {
 document.addEventListener('DOMContentLoaded', () => {
     // Wait a bit to ensure other initialization is complete
     setTimeout(initializeCalibrationWizard, 100);
+    setTimeout(initializePanoramaWizard, 100);
 });
 
 
@@ -3597,3 +3598,573 @@ function selectPointsInteractive(cameraId) {
     // TODO: Implement interactive point selection on camera preview
     showAlert('Not Implemented', 'Interactive point selection coming soon. Please enter points manually.');
 }
+
+
+// ============================================================================
+// Panorama Calibration
+// ============================================================================
+
+let panoramaPreviewInterval = null;
+let panoramaCalibrationResult = null;
+let panoramaSessionId = null;
+let panoramaCaptureCount = 0;
+let panoramaCaptureList = [];
+let panoramaAutoCapture = false;
+let panoramaAutoCaptureInterval = null;
+let panoramaLastBoardDetection = { cam1: false, cam2: false };
+
+function initializePanoramaWizard() {
+    const panoramaBtn = document.getElementById('panorama-btn');
+    const panoramaModal = document.getElementById('panorama-modal');
+    const closeBtn = panoramaModal.querySelector('.close');
+
+    // Open panorama wizard
+    panoramaBtn.addEventListener('click', openPanoramaCalibration);
+
+    // Close modal
+    closeBtn.addEventListener('click', closePanoramaCalibration);
+
+    // Session selection listener
+    document.getElementById('panorama-session-select').addEventListener('change', onPanoramaSessionChange);
+
+    // Camera selection listeners - both trigger the same update function
+    document.getElementById('panorama-camera1-select').addEventListener('change', updatePanoramaPreview);
+    document.getElementById('panorama-camera2-select').addEventListener('change', updatePanoramaPreview);
+
+    // Auto-capture toggle
+    document.getElementById('toggle-panorama-auto-capture').addEventListener('click', togglePanoramaAutoCapture);
+}
+
+function openPanoramaCalibration() {
+    const modal = document.getElementById('panorama-modal');
+    modal.classList.add('show');
+
+    // Populate camera selects
+    populatePanoramaCameraSelects();
+
+    // Load available sessions
+    loadPanoramaSessions();
+
+    // Reset state
+    panoramaCalibrationResult = null;
+    panoramaSessionId = null;
+    panoramaCaptureCount = 0;
+    panoramaCaptureList = [];
+    panoramaAutoCapture = false;
+    panoramaLastBoardDetection = { cam1: false, cam2: false };
+    if (panoramaAutoCaptureInterval) {
+        clearInterval(panoramaAutoCaptureInterval);
+        panoramaAutoCaptureInterval = null;
+    }
+    document.getElementById('panorama-results').style.display = 'none';
+    document.getElementById('panorama-test-btn').style.display = 'none';
+    document.getElementById('panorama-compute-btn').style.display = 'none';
+    document.getElementById('panorama-capture-list').innerHTML = '';
+    document.getElementById('toggle-panorama-auto-capture').classList.remove('active');
+    updatePanoramaCaptureStatus();
+}
+
+async function loadPanoramaSessions() {
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/sessions`);
+        const data = await response.json();
+
+        const select = document.getElementById('panorama-session-select');
+        select.innerHTML = '<option value="">New Session</option>';
+
+        if (data.success && data.sessions) {
+            // Filter for panorama sessions
+            const panoramaSessions = data.sessions.filter(s => s.startsWith('panorama_'));
+            panoramaSessions.sort().reverse(); // Most recent first
+
+            panoramaSessions.forEach(session => {
+                const option = document.createElement('option');
+                option.value = session;
+                option.textContent = session;
+                select.appendChild(option);
+            });
+        }
+    } catch (error) {
+        console.error('Error loading sessions:', error);
+    }
+}
+
+async function onPanoramaSessionChange() {
+    const sessionName = document.getElementById('panorama-session-select').value;
+    const sessionNameInput = document.getElementById('panorama-session-name');
+
+    if (!sessionName) {
+        // New session
+        sessionNameInput.value = '';
+        sessionNameInput.placeholder = 'Auto-generated';
+        sessionNameInput.disabled = false;
+        panoramaSessionId = null;
+        panoramaCaptureCount = 0;
+        panoramaCaptureList = [];
+        document.getElementById('panorama-capture-list').innerHTML = '';
+        updatePanoramaCaptureStatus();
+        return;
+    }
+
+    // Load existing session
+    sessionNameInput.value = sessionName;
+    sessionNameInput.disabled = true;
+    panoramaSessionId = sessionName;
+
+    try {
+        // Load session metadata
+        const response = await fetch(`${API_BASE}/api/calibration/session/${sessionName}`);
+        const data = await response.json();
+
+        if (data.success && data.session) {
+            // Populate settings from session
+            const metadata = data.session.metadata;
+            if (metadata) {
+                if (metadata.camera1_id || metadata.camera_id) {
+                    document.getElementById('panorama-camera1-select').value = metadata.camera1_id || metadata.camera_id;
+                }
+                if (metadata.camera2_id) {
+                    document.getElementById('panorama-camera2-select').value = metadata.camera2_id;
+                }
+                if (metadata.board_config) {
+                    document.getElementById('panorama-board-width').value = metadata.board_config.width || 8;
+                    document.getElementById('panorama-board-height').value = metadata.board_config.height || 5;
+                    document.getElementById('panorama-square-length').value = metadata.board_config.square_length || 50;
+                    document.getElementById('panorama-marker-length').value = metadata.board_config.marker_length || 37;
+                    document.getElementById('panorama-aruco-dictionary').value = metadata.board_config.dictionary || 'DICT_6X6_100';
+                }
+            }
+
+            // Count images
+            const imageCount = data.session.images ? data.session.images.length : 0;
+            panoramaCaptureCount = imageCount;
+            updatePanoramaCaptureStatus();
+
+            await showAlert('Session Loaded', `Loaded session "${sessionName}" with ${imageCount} captures`);
+        }
+    } catch (error) {
+        console.error('Error loading session:', error);
+        await showAlert('Error', 'Failed to load session');
+    }
+}
+
+function closePanoramaCalibration() {
+    const modal = document.getElementById('panorama-modal');
+    modal.classList.remove('show');
+
+    // Stop preview stream by clearing src
+    const preview = document.getElementById('panorama-camera-preview-composite');
+    if (preview) preview.src = '';
+
+    // Stop auto-capture
+    if (panoramaAutoCaptureInterval) {
+        clearInterval(panoramaAutoCaptureInterval);
+        panoramaAutoCaptureInterval = null;
+    }
+    panoramaAutoCapture = false;
+
+    // Clear interval (though not needed for streams)
+    if (panoramaPreviewInterval) {
+        clearInterval(panoramaPreviewInterval);
+        panoramaPreviewInterval = null;
+    }
+}
+
+function populatePanoramaCameraSelects() {
+    const select1 = document.getElementById('panorama-camera1-select');
+    const select2 = document.getElementById('panorama-camera2-select');
+
+    // Clear and populate
+    select1.innerHTML = '<option value="">Choose camera...</option>';
+    select2.innerHTML = '<option value="">Choose camera...</option>';
+
+    cameras.forEach(camera => {
+        const option1 = document.createElement('option');
+        option1.value = camera.id;
+        option1.textContent = camera.name || camera.id;
+        select1.appendChild(option1);
+
+        const option2 = document.createElement('option');
+        option2.value = camera.id;
+        option2.textContent = camera.name || camera.id;
+        select2.appendChild(option2);
+    });
+}
+
+async function updatePanoramaPreview() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+    const preview = document.getElementById('panorama-camera-preview-composite');
+    const placeholder = document.getElementById('panorama-preview-placeholder');
+
+    if (panoramaPreviewInterval) {
+        clearInterval(panoramaPreviewInterval);
+        panoramaPreviewInterval = null;
+    }
+
+    if (!camera1Id || !camera2Id) {
+        preview.style.display = 'none';
+        placeholder.style.display = 'flex';
+        preview.src = '';
+        return;
+    }
+
+    // Both cameras selected - initialize synchronized pair
+    await initializePanoramaPair();
+
+    // Use composite stream from camera 0 (the stream endpoint will return the composite)
+    preview.src = `${API_BASE}/api/cameras/${camera1Id}/stream?t=${Date.now()}`;
+    preview.style.display = 'block';
+    placeholder.style.display = 'none';
+}
+
+async function initializePanoramaPair() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+
+    // Only initialize if both cameras are selected
+    if (!camera1Id || !camera2Id) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/init-pair`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                camera1_id: camera1Id,
+                camera2_id: camera2Id
+            })
+        });
+
+        const result = await response.json();
+        if (!result.success) {
+            console.error('Failed to initialize synchronized pair:', result.error);
+        }
+    } catch (error) {
+        console.error('Error initializing synchronized pair:', error);
+    }
+}
+
+async function capturePanoramaCalibration() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+
+    if (!camera1Id || !camera2Id) {
+        await showAlert('Error', 'Please select both cameras');
+        return;
+    }
+
+    if (camera1Id === camera2Id) {
+        await showAlert('Error', 'Please select different cameras');
+        return;
+    }
+
+    // Initialize session ID if needed
+    if (!panoramaSessionId) {
+        const sessionName = document.getElementById('panorama-session-name').value.trim();
+        panoramaSessionId = sessionName || null; // Will be auto-generated by backend if null
+    }
+
+    // Get board config
+    const boardConfig = {
+        width: parseInt(document.getElementById('panorama-board-width').value),
+        height: parseInt(document.getElementById('panorama-board-height').value),
+        square_length: parseFloat(document.getElementById('panorama-square-length').value),
+        marker_length: parseFloat(document.getElementById('panorama-marker-length').value),
+        dictionary: document.getElementById('panorama-aruco-dictionary').value
+    };
+
+    // Update status
+    const statusEl = document.getElementById('panorama-detection-status');
+    statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Capturing image pair...</span>';
+
+    const captureBtn = document.getElementById('panorama-capture-btn');
+    captureBtn.disabled = true;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/capture`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                camera1_id: camera1Id,
+                camera2_id: camera2Id,
+                board_config: boardConfig,
+                session_id: panoramaSessionId
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Update session ID from response (in case it was auto-generated)
+            panoramaSessionId = result.session_id;
+            document.getElementById('panorama-session-name').value = result.session_id;
+
+            panoramaCaptureCount = result.capture_count;
+            panoramaCaptureList.push(result);
+
+            // Update UI
+            updatePanoramaCaptureList();
+            updatePanoramaCaptureStatus();
+
+            if (result.detected_both) {
+                statusEl.innerHTML = `<span class="status-icon">✅</span><span class="status-message">Capture ${result.capture_count}: ${result.matches} matches found</span>`;
+            } else {
+                statusEl.innerHTML = `<span class="status-icon">⚠️</span><span class="status-message">Capture ${result.capture_count}: Board not detected in both cameras</span>`;
+            }
+
+            // Show compute button after first successful capture
+            if (panoramaCaptureCount >= 1) {
+                document.getElementById('panorama-compute-btn').style.display = 'inline-block';
+            }
+        } else {
+            statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
+            await showAlert('Capture Failed', result.error);
+        }
+    } catch (error) {
+        console.error('Panorama capture error:', error);
+        statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${error.message}</span>`;
+        await showAlert('Error', 'Failed to capture: ' + error.message);
+    } finally {
+        captureBtn.disabled = false;
+    }
+}
+
+function updatePanoramaCaptureStatus() {
+    const statusText = document.getElementById('panorama-capture-status-text');
+    if (statusText) {
+        const successCount = panoramaCaptureList.filter(c => c.detected_both).length;
+        statusText.textContent = `${panoramaCaptureCount} captures (${successCount} with board detected in both cameras)`;
+    }
+}
+
+function updatePanoramaCaptureList() {
+    const listEl = document.getElementById('panorama-capture-list');
+    if (!listEl) return;
+
+    listEl.innerHTML = panoramaCaptureList.map((capture, idx) => {
+        const icon = capture.detected_both ? '✅' : '⚠️';
+        const status = capture.detected_both
+            ? `${capture.matches} matches`
+            : 'Board not detected';
+        return `<div class="capture-item">
+            <span>${icon} Capture ${idx + 1}</span>
+            <span class="capture-detail">${status}</span>
+        </div>`;
+    }).join('');
+}
+
+async function computePanoramaCalibration() {
+    const useCalibration = document.getElementById('panorama-use-calibration').checked;
+    const statusEl = document.getElementById('panorama-detection-status');
+
+    statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Computing homography from all captures...</span>';
+
+    const computeBtn = document.getElementById('panorama-compute-btn');
+    computeBtn.disabled = true;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/compute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: panoramaSessionId,
+                use_calibration: useCalibration
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            panoramaCalibrationResult = result;
+            displayPanoramaResults(result);
+            statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Calibration successful!</span>';
+            document.getElementById('panorama-test-btn').style.display = 'inline-block';
+        } else {
+            statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
+            await showAlert('Calibration Failed', result.error);
+        }
+    } catch (error) {
+        console.error('Panorama calibration error:', error);
+        statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${error.message}</span>`;
+        await showAlert('Error', 'Failed to compute calibration: ' + error.message);
+    } finally {
+        computeBtn.disabled = false;
+    }
+}
+
+async function resetPanoramaSession() {
+    if (panoramaSessionId) {
+        await fetch(`${API_BASE}/api/calibration/panorama/reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: panoramaSessionId })
+        });
+    }
+
+    panoramaSessionId = null;
+    panoramaCaptureCount = 0;
+    panoramaCaptureList = [];
+    panoramaCalibrationResult = null;
+
+    document.getElementById('panorama-results').style.display = 'none';
+    document.getElementById('panorama-test-btn').style.display = 'none';
+    document.getElementById('panorama-compute-btn').style.display = 'none';
+    document.getElementById('panorama-capture-list').innerHTML = '';
+    updatePanoramaCaptureStatus();
+
+    const statusEl = document.getElementById('panorama-detection-status');
+    statusEl.innerHTML = '<span class="status-icon">ℹ️</span><span class="status-message">Position ChArUco board visible to both cameras in overlapping region</span>';
+}
+
+function togglePanoramaAutoCapture() {
+    panoramaAutoCapture = !panoramaAutoCapture;
+    const btn = document.getElementById('toggle-panorama-auto-capture');
+
+    if (panoramaAutoCapture) {
+        btn.classList.add('active');
+        startPanoramaAutoCapture();
+    } else {
+        btn.classList.remove('active');
+        stopPanoramaAutoCapture();
+    }
+}
+
+function startPanoramaAutoCapture() {
+    const interval = parseInt(document.getElementById('panorama-auto-capture-interval').value) || 2;
+
+    // Check for board detection every 500ms
+    panoramaAutoCaptureInterval = setInterval(async () => {
+        if (!panoramaAutoCapture) return;
+
+        const camera1Id = document.getElementById('panorama-camera1-select').value;
+        const camera2Id = document.getElementById('panorama-camera2-select').value;
+
+        if (!camera1Id || !camera2Id) return;
+
+        // Check if board is detected in both cameras
+        try {
+            const boardConfig = {
+                width: parseInt(document.getElementById('panorama-board-width').value),
+                height: parseInt(document.getElementById('panorama-board-height').value),
+                square_length: parseFloat(document.getElementById('panorama-square-length').value),
+                marker_length: parseFloat(document.getElementById('panorama-marker-length').value),
+                dictionary: document.getElementById('panorama-aruco-dictionary').value
+            };
+
+            const response = await fetch(`${API_BASE}/api/calibration/panorama/check-detection`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    camera1_id: camera1Id,
+                    camera2_id: camera2Id,
+                    board_config: boardConfig
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success && result.detected_both) {
+                // Auto-capture if board detected in both
+                await capturePanoramaCalibration();
+
+                // Wait for the interval before next capture
+                await new Promise(resolve => setTimeout(resolve, interval * 1000));
+            }
+        } catch (error) {
+            console.error('Auto-capture detection error:', error);
+        }
+    }, 500);
+}
+
+function stopPanoramaAutoCapture() {
+    if (panoramaAutoCaptureInterval) {
+        clearInterval(panoramaAutoCaptureInterval);
+        panoramaAutoCaptureInterval = null;
+    }
+}
+
+function displayPanoramaResults(result) {
+    const resultsDiv = document.getElementById('panorama-results');
+    const contentDiv = document.getElementById('panorama-results-content');
+
+    const metrics = result.metrics;
+
+    contentDiv.innerHTML = `
+        <div class="calibration-metrics">
+            <div class="metric-item">
+                <span class="metric-label">Total Captures:</span>
+                <span class="metric-value">${result.total_captures}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Successful Captures:</span>
+                <span class="metric-value">${result.successful_captures}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Total Matches:</span>
+                <span class="metric-value">${result.total_matches}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Inliers:</span>
+                <span class="metric-value">${metrics.inliers} (${(metrics.inlier_ratio * 100).toFixed(1)}%)</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Mean Error:</span>
+                <span class="metric-value">${metrics.mean_error.toFixed(3)} px</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">RMSE:</span>
+                <span class="metric-value">${metrics.rmse.toFixed(3)} px</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Max Error:</span>
+                <span class="metric-value">${metrics.max_error.toFixed(3)} px</span>
+            </div>
+        </div>
+        <p style="margin-top: 15px; color: #666;">
+            ${metrics.inlier_ratio > 0.7 && metrics.rmse < 2.0
+            ? '✅ Good calibration quality! Ready for panorama stitching.'
+            : '⚠️ Calibration quality could be improved. Try capturing more images with the board in different positions.'}
+        </p>
+    `;
+
+    resultsDiv.style.display = 'block';
+}
+
+async function testPanoramaStitch() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+
+    const statusEl = document.getElementById('panorama-detection-status');
+    statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Generating stitched preview...</span>';
+
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/stitch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                camera1_id: camera1Id,
+                camera2_id: camera2Id,
+                blend_width: 50
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            const stitchImage = document.getElementById('panorama-stitch-image');
+            stitchImage.src = result.image;
+            statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Stitch preview generated</span>';
+        } else {
+            statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
+            await showAlert('Stitch Failed', result.error);
+        }
+    } catch (error) {
+        console.error('Stitch error:', error);
+        statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${error.message}</span>`;
+        await showAlert('Error', 'Failed to stitch panorama: ' + error.message);
+    }
+}
+
+

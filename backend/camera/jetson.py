@@ -331,8 +331,12 @@ class JetsonCameraBackend(CameraBackend):
             
             try:
                 # Create pipeline with tee for dual-stream (full-res + preview)
+                # Enable frame sync for multi-camera synchronization
                 pipeline_str = (
-                    f'nvarguscamerasrc sensor-id={camera_id} name=src ! '
+                    f'nvarguscamerasrc sensor-id={camera_id} name=src '
+                    f'wbmode=1 '  # Manual white balance for consistency
+                    f'aeantibanding=1 '  # 50Hz antibanding
+                    f'! '
                     f'video/x-raw(memory:NVMM),width={width},height={height},framerate={fps}/1 ! '
                     f'tee name=t '
                     
@@ -371,6 +375,7 @@ class JetsonCameraBackend(CameraBackend):
                     'full_frame': None,
                     'preview_frame': None,
                     'full_frame_lock': threading.Lock(),
+                    'full_frame_timestamp': None,
                     'preview_frame_lock': threading.Lock(),
                     'config': {
                         'width': width,
@@ -447,9 +452,11 @@ class JetsonCameraBackend(CameraBackend):
                     buffer=map_info.data
                 )
                 
-                # Store frame
+                # Store frame with timestamp
+                import time
                 with self.active_cameras[camera_id]['full_frame_lock']:
                     self.active_cameras[camera_id]['full_frame'] = frame.copy()
+                    self.active_cameras[camera_id]['full_frame_timestamp'] = time.time()
                 
                 buffer.unmap(map_info)
         
@@ -504,6 +511,54 @@ class JetsonCameraBackend(CameraBackend):
         
         with self.active_cameras[camera_id]['full_frame_lock']:
             return self.active_cameras[camera_id]['full_frame']
+    
+    def get_full_frame_with_timestamp(self, camera_id: str) -> Optional[Tuple[np.ndarray, float]]:
+        """Get latest full-resolution frame with capture timestamp.
+        
+        Returns:
+            Tuple of (frame, timestamp) or None if unavailable
+        """
+        if camera_id not in self.active_cameras:
+            return None
+        
+        with self.active_cameras[camera_id]['full_frame_lock']:
+            frame = self.active_cameras[camera_id]['full_frame']
+            timestamp = self.active_cameras[camera_id]['full_frame_timestamp']
+            if frame is not None and timestamp is not None:
+                return (frame.copy(), timestamp)
+            return None
+    
+    def get_full_frame_with_timestamp(self, camera_id: str) -> Optional[Tuple[np.ndarray, float]]:
+        """Get latest full-resolution frame with capture timestamp.
+        
+        Returns:
+            Tuple of (frame, timestamp) or None if unavailable
+        """
+        if camera_id not in self.active_cameras:
+            return None
+        
+        with self.active_cameras[camera_id]['full_frame_lock']:
+            frame = self.active_cameras[camera_id]['full_frame']
+            timestamp = self.active_cameras[camera_id]['full_frame_timestamp']
+            if frame is not None and timestamp is not None:
+                return (frame.copy(), timestamp)
+            return None
+    
+    def get_full_frame_with_timestamp(self, camera_id: str) -> Optional[Tuple[np.ndarray, float]]:
+        """Get latest full-resolution frame with capture timestamp.
+        
+        Returns:
+            Tuple of (frame, timestamp) or None if unavailable
+        """
+        if camera_id not in self.active_cameras:
+            return None
+        
+        with self.active_cameras[camera_id]['full_frame_lock']:
+            frame = self.active_cameras[camera_id]['full_frame']
+            timestamp = self.active_cameras[camera_id]['full_frame_timestamp']
+            if frame is not None and timestamp is not None:
+                return (frame, timestamp)
+            return None
 
     def get_preview_frame(self, camera_id: str) -> Optional[bytes]:
         """Get latest preview frame as JPEG."""
