@@ -311,12 +311,23 @@ def camera_stream(camera_id):
                                     camera_matrix = np.array(calibration_data['camera_matrix'])
                                     dist_coeffs = np.array(calibration_data['distortion_coeffs'])
                                     
+                                    # Scale calibration for preview resolution
+                                    # Calibration is done at full resolution, but preview is lower resolution
+                                    h, w = frame.shape[:2]
+                                    original_size = tuple(calibration_data.get('image_size', [w, h]))
+                                    target_size = (w, h)
+                                    
+                                    # Only scale if resolutions differ
+                                    if original_size != target_size:
+                                        camera_matrix, dist_coeffs = calibration_utils.scale_calibration_for_resolution(
+                                            camera_matrix, dist_coeffs, original_size, target_size
+                                        )
+                                    
                                     # Get alpha parameter (0 = crop all invalid pixels, 1 = keep all pixels)
                                     alpha = processing_config.get('alpha', 0.0)
                                     
                                     # Optionally use optimal camera matrix
                                     if alpha > 0:
-                                        h, w = frame.shape[:2]
                                         new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
                                             camera_matrix, dist_coeffs, (w, h), alpha
                                         )
@@ -1556,9 +1567,10 @@ def index():
 
 @app.route('/api/calibration/run', methods=['POST'])
 def run_calibration():
-    """Run camera calibration on captured images."""
+    """Run camera calibration with real-time progress updates via Server-Sent Events."""
     try:
         from datetime import datetime
+        import json as json_module
         
         data = request.json
         session_name = data.get('session_name')
@@ -1583,22 +1595,175 @@ def run_calibration():
                 'error': f'Session directory not found: {session_path}'
             }), 404
         
-        # Run calibration
-        results = calibrate_camera_from_session(session_path, board_config)
+        def generate():
+            """Generator function for SSE stream with real-time updates."""
+            import sys
+            
+            try:
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Starting calibration...'})}\n\n"
+                sys.stdout.flush()
+                
+                # Import calibration utilities inline to access functions
+                from pathlib import Path
+                import cv2
+                import numpy as np
+                
+                # Load images from session
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Loading calibration images...'})}\n\n"
+                sys.stdout.flush()
+                
+                image_files = sorted(Path(session_path).glob("image_*.jpg"))
+                
+                if len(image_files) < 5:
+                    yield f"data: {json_module.dumps({'type': 'error', 'error': f'Insufficient images for calibration. Found {len(image_files)}, need at least 5.'})}\n\n"
+                    return
+                
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Found {len(image_files)} images to process'})}\n\n"
+                sys.stdout.flush()
+                
+                # Create ChArUco board
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Creating ChArUco board definition...'})}\n\n"
+                sys.stdout.flush()
+                
+                aruco_dict = cv2.aruco.getPredefinedDictionary(
+                    getattr(cv2.aruco, board_config['dictionary'])
+                )
+                
+                board = cv2.aruco.CharucoBoard(
+                    (board_config['width'], board_config['height']),
+                    board_config['square_length'],
+                    board_config['marker_length'],
+                    aruco_dict
+                )
+                
+                # Detect ChArUco corners in all images
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Detecting ChArUco patterns in images...'})}\n\n"
+                sys.stdout.flush()
+                
+                all_charuco_corners = []
+                all_charuco_ids = []
+                image_size = None
+                processed_images = []
+                detector_params = cv2.aruco.DetectorParameters()
+                
+                for i, img_path in enumerate(image_files):
+                    yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Processing image {i+1}/{len(image_files)}: {img_path.name}'})}\n\n"
+                    sys.stdout.flush()
+                    
+                    img = cv2.imread(str(img_path))
+                    if img is None:
+                        continue
+                        
+                    if image_size is None:
+                        image_size = img.shape[:2][::-1]
+                    
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    marker_corners, marker_ids, rejected = cv2.aruco.detectMarkers(
+                        gray, aruco_dict, parameters=detector_params
+                    )
+                    
+                    if marker_ids is not None and len(marker_ids) > 0:
+                        ret, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
+                            marker_corners, marker_ids, gray, board
+                        )
+                        
+                        if ret and charuco_corners is not None and len(charuco_corners) >= 10:
+                            all_charuco_corners.append(charuco_corners)
+                            all_charuco_ids.append(charuco_ids)
+                            processed_images.append({
+                                'filename': img_path.name,
+                                'corners_detected': len(charuco_corners)
+                            })
+                
+                if len(all_charuco_corners) < 5:
+                    yield f"data: {json_module.dumps({'type': 'error', 'error': f'Not enough valid images. Found {len(all_charuco_corners)} images with patterns, need at least 5.'})}\n\n"
+                    return
+                
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Found {len(all_charuco_corners)} valid images with detected patterns'})}\n\n"
+                sys.stdout.flush()
+                
+                # Calibrate camera
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Computing camera parameters...'})}\n\n"
+                sys.stdout.flush()
+                
+                ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
+                    all_charuco_corners,
+                    all_charuco_ids,
+                    board,
+                    image_size,
+                    None,
+                    None
+                )
+                
+                if not ret:
+                    yield f"data: {json_module.dumps({'type': 'error', 'error': 'Calibration failed - unable to compute camera parameters'})}\n\n"
+                    return
+                
+                # Calculate reprojection error
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Calculating reprojection errors...'})}\n\n"
+                sys.stdout.flush()
+                
+                total_error = 0
+                num_points = 0
+                
+                for i in range(len(all_charuco_corners)):
+                    obj_points = board.getChessboardCorners()[all_charuco_ids[i].flatten()]
+                    img_points, _ = cv2.projectPoints(
+                        obj_points, rvecs[i], tvecs[i], camera_matrix, dist_coeffs
+                    )
+                    error = cv2.norm(all_charuco_corners[i], img_points, cv2.NORM_L2)
+                    total_error += error
+                    num_points += len(all_charuco_corners[i])
+                
+                mean_error = total_error / num_points if num_points > 0 else 0
+                
+                # Calculate individual image errors
+                image_errors = []
+                for i in range(len(all_charuco_corners)):
+                    obj_points = board.getChessboardCorners()[all_charuco_ids[i].flatten()]
+                    img_points, _ = cv2.projectPoints(
+                        obj_points, rvecs[i], tvecs[i], camera_matrix, dist_coeffs
+                    )
+                    error = cv2.norm(all_charuco_corners[i], img_points, cv2.NORM_L2) / len(all_charuco_corners[i])
+                    image_errors.append({
+                        'filename': processed_images[i]['filename'],
+                        'error': float(error),
+                        'corners': processed_images[i]['corners_detected']
+                    })
+                
+                # Build results
+                results = {
+                    'success': True,
+                    'camera_matrix': camera_matrix.tolist(),
+                    'distortion_coeffs': dist_coeffs.flatten().tolist(),
+                    'reprojection_error': float(mean_error),
+                    'images_used': len(all_charuco_corners),
+                    'images_total': len(image_files),
+                    'image_size': list(image_size),
+                    'image_errors': image_errors,
+                    'board_config': board_config,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                # Save calibration results
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Saving calibration results...'})}\n\n"
+                sys.stdout.flush()
+                
+                calibration_file = os.path.join(session_path, 'calibration_results.json')
+                with open(calibration_file, 'w') as f:
+                    json_module.dump(results, f, indent=2)
+                
+                # Send final result
+                yield f"data: {json_module.dumps({'type': 'complete', 'result': results})}\n\n"
+                sys.stdout.flush()
+                
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                yield f"data: {json_module.dumps({'type': 'error', 'error': str(e)})}\n\n"
+                sys.stdout.flush()
         
-        if not results.get('success', False):
-            return jsonify(results), 400
-        
-        # Add timestamp
-        results['timestamp'] = datetime.now().isoformat()
-        
-        # Save calibration results to session directory
-        calibration_file = os.path.join(session_path, 'calibration_results.json')
-        import json
-        with open(calibration_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        return jsonify(results)
+        return Response(generate(), mimetype='text/event-stream')
         
     except Exception as e:
         import traceback

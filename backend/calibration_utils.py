@@ -10,18 +10,24 @@ import os
 from pathlib import Path
 
 
-def calibrate_camera_from_session(session_path, board_config):
+def calibrate_camera_from_session(session_path, board_config, progress_callback=None):
     """
     Calibrate camera using images from a calibration session.
     
     Args:
         session_path: Path to calibration session directory containing images
         board_config: Dictionary with board configuration (dictionary, width, height, square_length, marker_length)
+        progress_callback: Optional callback function(message: str) for progress updates
     
     Returns:
         Dictionary with calibration results or error information
     """
+    def log_progress(message):
+        if progress_callback:
+            progress_callback(message)
+    
     try:
+        log_progress('Loading calibration images...')
         # Load images from session
         image_files = sorted(Path(session_path).glob("image_*.jpg"))
         
@@ -32,7 +38,10 @@ def calibrate_camera_from_session(session_path, board_config):
                 'images_found': len(image_files)
             }
         
+        log_progress(f'Found {len(image_files)} images to process')
+        
         # Create ChArUco board
+        log_progress('Creating ChArUco board definition...')
         aruco_dict = cv2.aruco.getPredefinedDictionary(
             getattr(cv2.aruco, board_config['dictionary'])
         )
@@ -45,6 +54,7 @@ def calibrate_camera_from_session(session_path, board_config):
         )
         
         # Detect ChArUco corners in all images
+        log_progress('Detecting ChArUco patterns in images...')
         all_charuco_corners = []
         all_charuco_ids = []
         image_size = None
@@ -54,6 +64,7 @@ def calibrate_camera_from_session(session_path, board_config):
         detector_params = cv2.aruco.DetectorParameters()
         
         for i, img_path in enumerate(image_files):
+            log_progress(f'Processing image {i+1}/{len(image_files)}: {img_path.name}')
             img = cv2.imread(str(img_path))
             if img is None:
                 continue
@@ -91,7 +102,10 @@ def calibrate_camera_from_session(session_path, board_config):
                 'images_total': len(image_files)
             }
         
+        log_progress(f'Found {len(all_charuco_corners)} valid images with detected patterns')
+        
         # Calibrate camera
+        log_progress('Computing camera parameters...')
         ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
             all_charuco_corners,
             all_charuco_ids,
@@ -108,6 +122,7 @@ def calibrate_camera_from_session(session_path, board_config):
                 'images_used': len(all_charuco_corners)
             }
         
+        log_progress('Calculating reprojection errors...')
         # Calculate reprojection error
         total_error = 0
         num_points = 0
@@ -265,3 +280,42 @@ def undistort_image(image, camera_matrix, dist_coeffs, crop=False):
         dst = cv2.undistort(image, camera_matrix, dist_coeffs, None, camera_matrix)
     
     return dst
+
+
+def scale_calibration_for_resolution(camera_matrix, dist_coeffs, original_size, target_size):
+    """
+    Scale camera calibration parameters from one resolution to another.
+    
+    When calibration is performed at one resolution but needs to be applied to a different resolution,
+    the camera matrix (focal lengths and principal point) must be scaled accordingly.
+    Distortion coefficients remain the same as they are dimensionless.
+    
+    Args:
+        camera_matrix: Original camera matrix (3x3 numpy array)
+        dist_coeffs: Distortion coefficients (numpy array, unchanged by scaling)
+        original_size: (width, height) tuple of the calibration resolution
+        target_size: (width, height) tuple of the target resolution
+    
+    Returns:
+        Tuple of (scaled_camera_matrix, dist_coeffs)
+    """
+    orig_width, orig_height = original_size
+    target_width, target_height = target_size
+    
+    # Calculate scaling factors
+    scale_x = target_width / orig_width
+    scale_y = target_height / orig_height
+    
+    # Create a copy of the camera matrix to avoid modifying the original
+    scaled_matrix = camera_matrix.copy()
+    
+    # Scale focal lengths (fx, fy)
+    scaled_matrix[0, 0] *= scale_x  # fx
+    scaled_matrix[1, 1] *= scale_y  # fy
+    
+    # Scale principal point (cx, cy)
+    scaled_matrix[0, 2] *= scale_x  # cx
+    scaled_matrix[1, 2] *= scale_y  # cy
+    
+    # Distortion coefficients are dimensionless and don't need scaling
+    return scaled_matrix, dist_coeffs

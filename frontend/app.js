@@ -1749,16 +1749,32 @@ async function loadPreviousCalibrationSessions() {
 }
 
 async function loadPreviousCalibration(sessionPath) {
+    // Show loading indicator in the dropdown area
+    const select = document.getElementById('previous-calibration-select');
+    const progressContainer = document.getElementById('session-load-progress');
+    const progressBar = document.getElementById('session-load-bar');
+    const progressCount = document.getElementById('session-load-count');
+    const originalHTML = select.innerHTML;
+
+    select.disabled = true;
+    if (progressContainer) {
+        progressContainer.style.display = 'block';
+    }
+
     try {
         const response = await fetch(`${API_BASE}/api/calibration/session/${encodeURIComponent(sessionPath)}`);
         const data = await response.json();
 
         if (!data.success) {
+            select.disabled = false;
+            select.innerHTML = originalHTML;
+            if (progressContainer) progressContainer.style.display = 'none';
             await showAlert('Error', data.message || 'Failed to load calibration session');
             return;
         }
 
         const session = data.session;
+        const totalImages = session.images.length;
 
         // Populate calibration data
         calibrationData.camera_id = session.camera_id;
@@ -1779,8 +1795,18 @@ async function loadPreviousCalibration(sessionPath) {
         let imageWidth = 1920;
         let imageHeight = 1080;
 
-        // Process each image's detection data
-        session.images.forEach((image, index) => {
+        // Process each image's detection data with async updates
+        for (let index = 0; index < session.images.length; index++) {
+            const image = session.images[index];
+
+            // Update progress bar
+            const percent = ((index + 1) / totalImages) * 100;
+            if (progressBar) progressBar.style.width = `${percent}%`;
+            if (progressCount) progressCount.textContent = `${index + 1}/${totalImages}`;
+
+            // Force immediate UI update by yielding to browser every iteration
+            await new Promise(resolve => setTimeout(resolve, 0));
+
             if (image.detection && image.detection.detected) {
                 const detection = image.detection;
 
@@ -1827,7 +1853,7 @@ async function loadPreviousCalibration(sessionPath) {
                     });
                 }
             }
-        });
+        }
 
         // Initialize coverage map canvas with proper dimensions
         if (coverageMapCanvas) {
@@ -1888,10 +1914,19 @@ async function loadPreviousCalibration(sessionPath) {
             skipBtn.style.display = 'inline-block';
         }
 
+        // Re-enable dropdown and hide progress
+        select.disabled = false;
+        select.innerHTML = originalHTML;
+        select.value = sessionPath;
+        if (progressContainer) progressContainer.style.display = 'none';
+
         await showAlert('Session Loaded', `Loaded calibration session with ${session.images.length} captured images.\n\nPose diversity: ${captureCount} captures analyzed.\n\nYou can continue capturing or proceed to calibration.`);
 
     } catch (error) {
         console.error('Failed to load calibration session:', error);
+        select.disabled = false;
+        select.innerHTML = originalHTML;
+        if (progressContainer) progressContainer.style.display = 'none';
         await showAlert('Error', 'Failed to load calibration session: ' + error.message);
     }
 }
@@ -2756,8 +2791,6 @@ async function runCalibration() {
         }
 
         addCalibrationLog(`Found ${calibrationData.captured_images.length} captured images`);
-        progressBar.style.width = '10%';
-        progressLabel.textContent = '10%';
 
         // Use board configuration from calibrationData
         const boardConfig = {
@@ -2769,34 +2802,10 @@ async function runCalibration() {
         };
 
         addCalibrationLog('Board configuration loaded');
-        progressBar.style.width = '20%';
-        progressLabel.textContent = '20%';
-
-        // Call backend calibration API
         addCalibrationLog('Sending calibration request to server...');
-        updateCalibrationStatus('⏳', 'Processing Images', 'Running calibration algorithm (estimated progress)...');
+        updateCalibrationStatus('⏳', 'Processing Images', 'Running calibration algorithm...');
 
-        // Start simulated progress updates while waiting for response
-        let currentProgress = 20;
-        const progressInterval = setInterval(() => {
-            if (currentProgress < 90) {
-                currentProgress += 5;
-                progressBar.style.width = `${currentProgress}%`;
-                progressLabel.textContent = `${currentProgress}% (estimated)`;
-
-                // Update log messages at specific points
-                if (currentProgress === 30) {
-                    addCalibrationLog('Detecting ChArUco patterns in images...');
-                } else if (currentProgress === 50) {
-                    addCalibrationLog('Analyzing corner detections...');
-                } else if (currentProgress === 70) {
-                    addCalibrationLog('Computing camera parameters...');
-                } else if (currentProgress === 85) {
-                    addCalibrationLog('Calculating reprojection errors...');
-                }
-            }
-        }, 400); // Update every 400ms
-
+        // Use fetch with streaming response
         const response = await fetch('/api/calibration/run', {
             method: 'POST',
             headers: {
@@ -2809,42 +2818,95 @@ async function runCalibration() {
             })
         });
 
-        // Stop progress simulation
-        clearInterval(progressInterval);
-        progressBar.style.width = '95%';
-        progressLabel.textContent = '95%';
-
-        const result = await response.json();
-
-        if (!response.ok || !result.success) {
-            throw new Error(result.error || 'Calibration failed');
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Calibration request failed:', errorText);
+            throw new Error('Calibration request failed: ' + errorText);
         }
 
-        addCalibrationLog(`Processed ${result.images_used} images successfully`);
-        progressBar.style.width = '100%';
-        progressLabel.textContent = '100%';
+        console.log('Starting to read streaming response...');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let progressStep = 10;
+        let messageCount = 0;
 
-        // Store calibration results
-        calibrationData.results = result;
+        while (true) {
+            const { done, value } = await reader.read();
 
-        addCalibrationLog(`Reprojection error: ${result.reprojection_error.toFixed(4)} pixels`);
-        addCalibrationLog('Calibration completed successfully!', 'success');
+            if (done) {
+                console.log(`Stream complete. Received ${messageCount} messages total.`);
+                // If we got messages but no 'complete' message, the stream may have ended prematurely
+                if (messageCount > 0 && !calibrationData.results) {
+                    console.warn('Stream ended without completion message');
+                    throw new Error('Calibration stream ended unexpectedly. Please try again.');
+                }
+                break;
+            }
 
-        // Update status to complete
-        updateCalibrationStatus('✅', 'Calibration Complete',
-            `Successfully calibrated with error: ${result.reprojection_error.toFixed(4)} pixels`);
-        addCalibrationLog('Ready to review results!', 'success');
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
 
-        // Update button
-        btn.disabled = false;
-        btn.textContent = '✓ Calibration Complete';
-        btn.classList.remove('btn-primary');
-        btn.classList.add('btn-success');
+            console.log(`Processing ${lines.length} SSE lines`);
 
-        // Enable next button
-        const nextBtn = document.querySelector('[data-panel="3"] .wizard-next');
-        if (nextBtn) {
-            nextBtn.disabled = false;
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.substring(6));
+                        messageCount++;
+                        console.log(`Message ${messageCount}:`, data);
+
+                        if (data.type === 'progress') {
+                            // Update progress incrementally
+                            progressStep = Math.min(progressStep + 3, 90);
+                            progressBar.style.width = `${progressStep}%`;
+                            progressLabel.textContent = `${progressStep}%`;
+
+                            // Add to log
+                            addCalibrationLog(data.message);
+
+                        } else if (data.type === 'complete') {
+                            const result = data.result;
+                            console.log('Calibration complete:', result);
+
+                            // Complete progress
+                            progressBar.style.width = '100%';
+                            progressLabel.textContent = '100%';
+
+                            // Store calibration results
+                            calibrationData.results = result;
+
+                            addCalibrationLog(`Processed ${result.images_used} images successfully`);
+                            addCalibrationLog(`Reprojection error: ${result.reprojection_error.toFixed(4)} pixels`);
+                            addCalibrationLog('Calibration completed successfully!', 'success');
+
+                            // Update status to complete
+                            updateCalibrationStatus('✅', 'Calibration Complete',
+                                `Successfully calibrated with error: ${result.reprojection_error.toFixed(4)} pixels`);
+                            addCalibrationLog('Ready to review results!', 'success');
+
+                            // Update button
+                            btn.disabled = false;
+                            btn.textContent = '✓ Calibration Complete';
+                            btn.classList.remove('btn-primary');
+                            btn.classList.add('btn-success');
+
+                            // Enable next button
+                            const nextBtn = document.querySelector('[data-panel="3"] .wizard-next');
+                            if (nextBtn) {
+                                nextBtn.disabled = false;
+                            }
+
+                        } else if (data.type === 'error') {
+                            console.error('Calibration error:', data.error);
+                            throw new Error(data.error || 'Calibration failed');
+                        }
+                    } catch (parseError) {
+                        console.error('Error parsing SSE message:', parseError, 'Line:', line);
+                    }
+                }
+            }
         }
 
     } catch (error) {

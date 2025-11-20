@@ -78,3 +78,7 @@ index.html
 
 # Calibration data
 data/calibration/*/
+
+# Camera calibration settings
+backend/camera/settings/**/*.json
+!backend/camera/settings/**/README.md
