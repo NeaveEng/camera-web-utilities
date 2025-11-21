@@ -221,6 +221,26 @@ def stop_camera(camera_id):
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
+@app.route('/api/sync-pairs/stop-all', methods=['POST'])
+def stop_all_sync_pairs():
+    """Stop and remove all synchronized camera pairs."""
+    try:
+        pairs = list(sync_pair_manager.get_all_pairs().keys())
+        removed_count = 0
+        
+        for camera1_id, camera2_id in pairs:
+            if sync_pair_manager.remove_pair(camera1_id, camera2_id):
+                removed_count += 1
+        
+        return jsonify({
+            'success': True,
+            'message': f'Stopped {removed_count} synchronized pair(s)',
+            'pairs_stopped': removed_count
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
 @app.route('/api/cameras/<camera_id>/stream')
 def camera_stream(camera_id):
     """MJPEG stream endpoint for a camera. Checks synchronized pairs first."""
@@ -1688,58 +1708,27 @@ def get_calibration_session(session_path):
         image_files = sorted(glob.glob(os.path.join(camera_dir, '*.jpg')) + \
                            glob.glob(os.path.join(camera_dir, '*.png')))
         
+        # For quick loading, just return basic image info without detection
+        # Pattern detection will only run when specifically requested
         images = []
         for i, img_path in enumerate(image_files, 1):
-            image_data = {
+            images.append({
                 'id': i,
                 'path': img_path,
                 'filename': os.path.basename(img_path)
-            }
-            
-            # Analyze image for pattern detection if calibration plugin is available
-            if calibration_plugin and board_config:
-                try:
-                    # Load image
-                    img = cv2.imread(img_path)
-                    if img is not None:
-                        # Detect pattern
-                        detection = calibration_plugin.detect_charuco_pattern(img)
-                        
-                        if detection.get('detected'):
-                            # Add detection data
-                            image_data['detection'] = {
-                                'detected': True,
-                                'markers_detected': detection.get('markers_detected', 0),
-                                'corners_detected': detection.get('corners_detected', 0),
-                                'quality': detection.get('quality', 'Unknown'),
-                                'image_width': img.shape[1],
-                                'image_height': img.shape[0]
-                            }
-                            
-                            # Add marker corners
-                            if detection.get('marker_corners') is not None:
-                                marker_corners = detection['marker_corners']
-                                image_data['detection']['marker_corners'] = [
-                                    corners.reshape(-1, 2).tolist() for corners in marker_corners
-                                ]
-                            
-                            # Add marker IDs
-                            if detection.get('marker_ids') is not None:
-                                image_data['detection']['marker_ids'] = detection['marker_ids'].flatten().tolist()
-                            
-                            # Classify pose
-                            if detection.get('marker_corners') is not None:
-                                poses = classify_board_pose(
-                                    detection['marker_corners'],
-                                    img.shape[1],
-                                    img.shape[0]
-                                )
-                                image_data['detection']['poses'] = poses
-                except Exception as e:
-                    print(f"Error analyzing image {img_path}: {e}")
-                    # Continue without detection data for this image
-            
-            images.append(image_data)
+            })
+        
+        # Check if calibration results exist
+        calibration_results = None
+        calibration_results_path = os.path.join(camera_dir, 'calibration_results.json')
+        if os.path.exists(calibration_results_path):
+            try:
+                with open(calibration_results_path, 'r') as f:
+                    calibration_results = json.load(f)
+            except Exception as e:
+                print(f"Error loading calibration results: {e}")
+                import traceback
+                traceback.print_exc()
         
         return jsonify({
             'success': True,
@@ -1749,7 +1738,8 @@ def get_calibration_session(session_path):
                 'model': model,
                 'board_config': board_config,
                 'target_images': target_images,
-                'images': images
+                'images': images,
+                'calibration_results': calibration_results
             }
         })
         
@@ -2589,20 +2579,238 @@ def panorama_stitch():
 
 
 # ============================================================================
-# Stereo Calibration Placeholder
+# Stereo Calibration - Compute extrinsics between camera pairs
 # ============================================================================
+
+@app.route('/api/calibration/stereo/compute', methods=['POST'])
+def stereo_calibrate():
+    """
+    Compute stereo calibration (extrinsics) between two cameras using synchronized captures.
+    This calculates rotation and translation between cameras for panorama stitching.
+    """
+    import cv2
+    
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        calibration_flags = data.get('flags', 'CALIB_FIX_INTRINSIC')
+        cam1_calib_session = data.get('cam1_calibration_session')
+        cam2_calib_session = data.get('cam2_calibration_session')
+        
+        if not session_id:
+            return jsonify({'success': False, 'error': 'Session ID required'}), 400
+        
+        # Parse session ID to get camera directories
+        # Format: panorama_YYYYMMDD_HHMMSS or 0_1_timestamp
+        session_path = Path('data/calibration') / session_id
+        
+        if not session_path.exists():
+            return jsonify({'success': False, 'error': f'Session not found: {session_id}'}), 404
+        
+        # Load session info to get camera IDs
+        session_info_path = session_path / 'session_info.json'
+        if not session_info_path.exists():
+            return jsonify({'success': False, 'error': 'Session info not found'}), 404
+        
+        with open(session_info_path, 'r') as f:
+            session_info = json.load(f)
+        
+        camera1_id = str(session_info.get('camera1_id') or session_info.get('camera_id', '0'))
+        camera2_id = str(session_info.get('camera2_id', '1'))
+        
+        # Paths to synchronized images
+        camera1_path = session_path / camera1_id
+        camera2_path = session_path / camera2_id
+        
+        if not camera1_path.exists() or not camera2_path.exists():
+            return jsonify({
+                'success': False,
+                'error': f'Camera image directories not found in session'
+            }), 404
+        
+        # Load individual camera calibrations
+        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+        if not calibration_plugin:
+            return jsonify({
+                'success': False,
+                'error': 'Calibration plugin not available'
+            }), 500
+        
+        # Load camera 1 calibration from specified session or auto-detect
+        if cam1_calib_session:
+            cam1_calib_path = Path('data/calibration') / cam1_calib_session / camera1_id / 'calibration_results.json'
+            if not cam1_calib_path.exists():
+                return jsonify({
+                    'success': False,
+                    'error': f'Camera 0 calibration not found in session: {cam1_calib_session}',
+                    'camera': camera1_id
+                }), 400
+            with open(cam1_calib_path, 'r') as f:
+                cam1_result = json.load(f)
+                cam1_result['success'] = True
+        else:
+            cam1_result = calibration_plugin.load_calibration(f"camera_{camera1_id}")
+        
+        if not cam1_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': f'Camera {camera1_id} calibration not found. Please select a calibration session for Camera 0.',
+                'camera': camera1_id
+            }), 400
+        
+        # Load camera 2 calibration from specified session or auto-detect
+        if cam2_calib_session:
+            cam2_calib_path = Path('data/calibration') / cam2_calib_session / camera2_id / 'calibration_results.json'
+            if not cam2_calib_path.exists():
+                return jsonify({
+                    'success': False,
+                    'error': f'Camera 1 calibration not found in session: {cam2_calib_session}',
+                    'camera': camera2_id
+                }), 400
+            with open(cam2_calib_path, 'r') as f:
+                cam2_result = json.load(f)
+                cam2_result['success'] = True
+        else:
+            cam2_result = calibration_plugin.load_calibration(f"camera_{camera2_id}")
+        
+        if not cam2_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': f'Camera {camera2_id} calibration not found. Please select a calibration session for Camera 1.',
+                'camera': camera2_id
+            }), 400
+        
+        # Prepare calibration data
+        camera1_calib = {
+            'camera_matrix': cam1_result['camera_matrix'],
+            'distortion_coeffs': cam1_result['distortion_coeffs']
+        }
+        camera2_calib = {
+            'camera_matrix': cam2_result['camera_matrix'],
+            'distortion_coeffs': cam2_result['distortion_coeffs']
+        }
+        
+        # Get board config
+        board_config = session_info.get('board_config', {
+            'width': 8,
+            'height': 5,
+            'square_length': 0.050,
+            'marker_length': 0.037,
+            'dictionary': 'DICT_6X6_100'
+        })
+        
+        # Parse calibration flags
+        cv2_flags = 0
+        if calibration_flags:
+            if isinstance(calibration_flags, str):
+                flags_list = [f.strip() for f in calibration_flags.split('|')]
+            else:
+                flags_list = calibration_flags if isinstance(calibration_flags, list) else [calibration_flags]
+            
+            for flag_name in flags_list:
+                if hasattr(cv2, flag_name):
+                    cv2_flags |= getattr(cv2, flag_name)
+        
+        # Import stereo calibration function
+        from backend.calibration_utils import stereo_calibrate_from_sessions
+        
+        # Progress tracking
+        progress_messages = []
+        def progress_callback(msg):
+            progress_messages.append(msg)
+            print(f"[Stereo Calibration] {msg}")
+        
+        # Run stereo calibration
+        result = stereo_calibrate_from_sessions(
+            str(camera1_path),
+            str(camera2_path),
+            board_config,
+            camera1_calib,
+            camera2_calib,
+            flags=cv2_flags if cv2_flags > 0 else None,
+            progress_callback=progress_callback
+        )
+        
+        if result['success']:
+            # Save stereo calibration
+            from backend.panorama_utils import save_stereo_calibration
+            save_path = save_stereo_calibration(result, camera1_id, camera2_id)
+            result['save_path'] = save_path
+            result['progress'] = progress_messages
+            
+            # Also compute optimal homography from stereo calibration
+            from backend.calibration_utils import compute_optimal_homography_from_stereo
+            H = compute_optimal_homography_from_stereo(result, tuple(result['image_size']))
+            result['optimal_homography'] = H.tolist()
+        else:
+            result['progress'] = progress_messages
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/stereo/load', methods=['GET'])
+def stereo_load():
+    """Load existing stereo calibration between two cameras."""
+    try:
+        camera1_id = request.args.get('camera1_id')
+        camera2_id = request.args.get('camera2_id')
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        from backend.panorama_utils import load_stereo_calibration
+        calibration = load_stereo_calibration(camera1_id, camera2_id)
+        
+        if calibration is None:
+            return jsonify({
+                'success': False,
+                'error': f'No stereo calibration found for cameras {camera1_id} and {camera2_id}'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'calibration': calibration
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/calibration/stereo/info', methods=['GET'])
 def stereo_info():
-    """Placeholder for future stereo calibration feature."""
+    """Get information about stereo calibration capabilities."""
     return jsonify({
-        'available': False,
-        'message': 'Stereo calibration for depth/3D reconstruction coming soon',
+        'available': True,
+        'message': 'Stereo calibration computes extrinsic relationship (rotation and translation) between camera pairs',
         'features': [
-            'Simultaneous ChArUco board detection',
-            'Epipolar geometry computation',
-            'Rectification for depth mapping',
-            'Disparity map generation'
+            'Rotation and translation matrix computation',
+            'Essential and fundamental matrix calculation',
+            'Epipolar geometry for geometric accuracy',
+            'Rectification transforms for aligned images',
+            'Optimal homography computation for stitching',
+            'Support for divergent cameras with minimal overlap'
+        ],
+        'calibration_flags': {
+            'CALIB_FIX_INTRINSIC': 'Use fixed camera matrices from individual calibrations (recommended)',
+            'CALIB_USE_INTRINSIC_GUESS': 'Optimize camera matrices using individual calibrations as starting point',
+            'CALIB_FIX_PRINCIPAL_POINT': 'Fix principal point during optimization',
+            'CALIB_FIX_FOCAL_LENGTH': 'Fix focal lengths during optimization',
+            'CALIB_FIX_ASPECT_RATIO': 'Fix aspect ratio (fx/fy) during optimization',
+            'CALIB_SAME_FOCAL_LENGTH': 'Enforce same focal length for both cameras',
+            'CALIB_RATIONAL_MODEL': 'Use rational distortion model (k4,k5,k6)',
+            'CALIB_THIN_PRISM_MODEL': 'Use thin prism distortion model',
+            'CALIB_FIX_S1_S2_S3_S4': 'Fix thin prism distortion coefficients'
+        },
+        'recommended_flags_divergent': [
+            'CALIB_FIX_INTRINSIC',
+            'For divergent cameras, use fixed intrinsics from individual calibrations'
         ]
     })
 

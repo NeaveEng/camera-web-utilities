@@ -7,7 +7,74 @@
 
 ---
 
-## 🚧 ACTIVE WORK - Panorama Calibration Session Loading (20 Nov 2025)
+## 🚧 ACTIVE WORK - Stereo Calibration for Panorama (21 Nov 2025)
+
+### Recently Implemented
+✅ **Stereo calibration workflow** for computing extrinsics between camera pairs
+✅ **Divergent camera support** with configurable calibration flags for minimal overlap scenarios
+✅ **Optimal homography computation** from stereo rotation matrix for geometric accuracy
+✅ **UI controls** for stereo calibration settings and flag selection
+✅ **Calibration selection interface** - Users can now select which calibration session to use for each camera
+
+### What's Working
+✅ Stereo calibration API endpoints (`/api/calibration/stereo/compute`, `/load`, `/info`)
+✅ **Calibration session dropdowns** for Camera 0 and Camera 1 in panorama modal
+✅ Individual camera calibration loading from selected sessions
+✅ Visual status indicators (✅/❌) showing calibration selection state
+✅ Validation that both calibrations are selected before stereo calibration
+✅ ChArUco-based correspondence matching across synchronized pairs
+✅ Rotation (R) and Translation (T) matrix computation via cv2.stereoCalibrate()
+✅ Essential and Fundamental matrix calculation
+✅ Rectification transforms for epipolar alignment
+✅ Optimal homography: H = K2 * R * K1^-1
+✅ Configurable calibration flags via UI (CALIB_FIX_INTRINSIC, etc.)
+✅ Comprehensive results display with Euler angles and translation vectors
+
+### Calibration Selection Features
+- **Dropdown population:** Automatically loads all calibration sessions from `/api/calibration/sessions`
+- **Session filtering:** Shows calibration sessions with results, filtered by camera ID
+- **Error display:** Shows reprojection error in dropdown (e.g., "session_xxx (0.523px)")
+- **Status indicators:** Green checkmark when calibration selected, red X when missing
+- **Validation:** Frontend checks both calibrations are selected before allowing stereo calibration
+- **Backend support:** API accepts `cam1_calibration_session` and `cam2_calibration_session` parameters
+- **Manual loading:** Loads calibration results directly from session's `calibration_results.json`
+
+### UI Changes
+**Added to Panorama Modal (frontend/index.html):**
+- Orange-highlighted "Individual Camera Calibrations" panel
+- Two dropdown selects: `panorama-cam1-calib-select` and `panorama-cam2-calib-select`
+- Status divs showing selection state
+- Help text: "Required for stereo calibration. Use single-camera calibration wizard if needed."
+
+**JavaScript Functions Added (frontend/app.js):**
+- `loadPanoramaCalibrationOptions()`: Fetches and populates calibration dropdowns
+- `updatePanoramaCalibrationStatus(camera)`: Updates visual status indicators
+- Updated `computePanoramaCalibration()`: Validates selections and sends session names to API
+
+**Backend Changes (backend/app.py):**
+- Added `cam1_calibration_session` and `cam2_calibration_session` parameters
+- Manual JSON loading from specified sessions instead of auto-detection
+- Better error messages indicating which camera calibration is missing
+
+### Implementation Notes
+1. **Calibration Loading:** Instead of using the calibration plugin's auto-load (which looks for `camera_{id}` in default location), the system now loads directly from the user-selected session's `data/calibration/{session}/{camera_id}/calibration_results.json`
+
+2. **Session Validation:** The frontend validates that calibration results exist before adding sessions to dropdowns
+
+3. **Flexible Camera IDs:** System handles camera IDs as strings ('0', '1') or integers (0, 1) for compatibility
+
+4. **Error Handling:** Clear error messages guide users to select calibrations if missing
+
+### Files Modified (Calibration Selection Fix)
+- `frontend/index.html`: Added calibration selection dropdowns with status indicators
+- `frontend/app.js`: Added `loadPanoramaCalibrationOptions()` and validation logic
+- `backend/app.py`: Updated stereo calibration endpoint to accept session names
+
+### Previous Issue (Session Loading)
+❌ Session dropdown in panorama calibration wizard not populating with existing sessions
+- Status: Not yet addressed, stereo calibration was prioritized
+
+---
 
 ### Current Issue
 Session dropdown in panorama calibration wizard not populating with existing sessions after implementing session persistence.

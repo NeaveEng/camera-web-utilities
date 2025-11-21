@@ -319,6 +319,75 @@ def save_panorama_calibration(calibration_data: dict, camera1_id: str, camera2_i
     return str(filepath)
 
 
+def save_stereo_calibration(stereo_calib: dict, camera1_id: str, camera2_id: str,
+                            output_dir: str = "backend/camera/settings/stereo") -> str:
+    """
+    Save stereo calibration (extrinsics) to disk.
+    
+    Args:
+        stereo_calib: Stereo calibration result dictionary
+        camera1_id: ID of first camera
+        camera2_id: ID of second camera
+        output_dir: Directory to save calibration
+    
+    Returns:
+        Path to saved file
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Create filename
+    filename = f"{camera1_id}_{camera2_id}.json"
+    filepath = output_path / filename
+    
+    # Add metadata
+    save_data = {
+        'camera1_id': camera1_id,
+        'camera2_id': camera2_id,
+        'stereo_calibration': stereo_calib,
+        'version': '1.0',
+        'description': 'Stereo calibration containing rotation, translation, and epipolar geometry'
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(save_data, f, indent=2)
+    
+    logger.info(f"Saved stereo calibration to {filepath}")
+    return str(filepath)
+
+
+def load_stereo_calibration(camera1_id: str, camera2_id: str,
+                            input_dir: str = "backend/camera/settings/stereo") -> Optional[dict]:
+    """
+    Load stereo calibration from disk.
+    
+    Args:
+        camera1_id: ID of first camera
+        camera2_id: ID of second camera
+        input_dir: Directory containing calibrations
+    
+    Returns:
+        Stereo calibration data or None if not found
+    """
+    input_path = Path(input_dir)
+    
+    # Try both camera order combinations
+    filenames = [
+        f"{camera1_id}_{camera2_id}.json",
+        f"{camera2_id}_{camera1_id}.json"
+    ]
+    
+    for filename in filenames:
+        filepath = input_path / filename
+        if filepath.exists():
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            logger.info(f"Loaded stereo calibration from {filepath}")
+            return data
+    
+    return None
+
+
 def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]],
                                 board_config: dict,
                                 camera1_calibration: Optional[dict] = None,
