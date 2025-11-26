@@ -15,7 +15,6 @@ from backend.camera.groups import CameraGroupManager
 from backend.camera.sync_pair import SynchronizedPairManager
 from backend.features.manager import FeatureManager
 from backend.workflows.manager import WorkflowManager
-from backend.calibration_utils import calibrate_camera_from_session, save_calibration_results
 from backend.panorama_utils import calibrate_panorama_pair, save_panorama_calibration, load_panorama_calibration, stitch_images
 
 
@@ -246,7 +245,6 @@ def camera_stream(camera_id):
     """MJPEG stream endpoint for a camera."""
     import cv2
     import numpy as np
-    from backend import calibration_utils
     
     print(f"[Stream] Stream requested for camera {camera_id}")
     
@@ -338,9 +336,10 @@ def camera_stream(camera_id):
                         
                         if processing_type == 'undistort':
                             # Load calibration data
+                            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
                             calibration_file = processing_config.get('calibration_file')
-                            if calibration_file and os.path.exists(calibration_file):
-                                calibration_data = calibration_utils.load_calibration(calibration_file)
+                            if calibration_file and os.path.exists(calibration_file) and calibration_plugin:
+                                calibration_data = calibration_plugin.load_calibration(calibration_file)
                                 if calibration_data:
                                     camera_matrix = np.array(calibration_data['camera_matrix'])
                                     dist_coeffs = np.array(calibration_data['distortion_coeffs'])
@@ -353,7 +352,7 @@ def camera_stream(camera_id):
                                     
                                     # Only scale if resolutions differ
                                     if original_size != target_size:
-                                        camera_matrix, dist_coeffs = calibration_utils.scale_calibration_for_resolution(
+                                        camera_matrix, dist_coeffs = calibration_plugin.scale_calibration_for_resolution(
                                             camera_matrix, dist_coeffs, original_size, target_size
                                         )
                                     
@@ -1620,82 +1619,77 @@ def run_calibration():
         def generate():
             """Generator function for SSE stream with real-time updates."""
             import sys
+            from pathlib import Path
             
             try:
                 yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Starting calibration...'})}\n\n"
                 sys.stdout.flush()
                 
-                # Import calibration utilities inline to access functions
-                from pathlib import Path
-                import cv2
-                import numpy as np
+                # Get calibration plugin
+                calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+                if not calibration_plugin:
+                    yield f"data: {json_module.dumps({'type': 'error', 'error': 'Calibration plugin not available'})}\n\n"
+                    return
                 
-                # Load images from session
+                # Configure board
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Configuring ChArUco board...'})}\n\n"
+                sys.stdout.flush()
+                
+                calibration_plugin.configure_board(
+                    width=board_config['width'],
+                    height=board_config['height'],
+                    square_length=board_config['square_length'],
+                    marker_length=board_config['marker_length'],
+                    dictionary=board_config['dictionary']
+                )
+                
+                # Get image paths
                 yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Loading calibration images...'})}\n\n"
                 sys.stdout.flush()
                 
                 image_files = sorted(Path(session_path).glob("image_*.jpg"))
+                image_paths = [str(img) for img in image_files]
                 
-                if len(image_files) < 5:
-                    yield f"data: {json_module.dumps({'type': 'error', 'error': f'Insufficient images for calibration. Found {len(image_files)}, need at least 5.'})}\n\n"
+                if len(image_paths) < 5:
+                    yield f"data: {json_module.dumps({'type': 'error', 'error': f'Insufficient images for calibration. Found {len(image_paths)}, need at least 5.'})}\n\n"
                     return
                 
-                yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Found {len(image_files)} images to process'})}\n\n"
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Found {len(image_paths)} images to process'})}\n\n"
                 sys.stdout.flush()
                 
-                # Create ChArUco board
-                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Creating ChArUco board definition...'})}\n\n"
-                sys.stdout.flush()
-                
-                aruco_dict = cv2.aruco.getPredefinedDictionary(
-                    getattr(cv2.aruco, board_config['dictionary'])
-                )
-                
-                board = cv2.aruco.CharucoBoard(
-                    (board_config['width'], board_config['height']),
-                    board_config['square_length'],
-                    board_config['marker_length'],
-                    aruco_dict
-                )
-                
-                # Detect ChArUco corners in all images
-                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Detecting ChArUco patterns in images...'})}\n\n"
-                sys.stdout.flush()
+                # Process images one by one with progress updates
+                import cv2
+                import numpy as np
                 
                 all_charuco_corners = []
                 all_charuco_ids = []
                 image_size = None
-                processed_images = []
-                detector_params = cv2.aruco.DetectorParameters()
                 
-                for i, img_path in enumerate(image_files):
-                    yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Processing image {i+1}/{len(image_files)}: {img_path.name}'})}\n\n"
+                for i, img_path in enumerate(image_paths):
+                    yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Processing image {i+1}/{len(image_paths)}: {Path(img_path).name}'})}\n\n"
                     sys.stdout.flush()
                     
-                    img = cv2.imread(str(img_path))
-                    if img is None:
+                    image = cv2.imread(img_path)
+                    if image is None:
                         continue
-                        
+                    
                     if image_size is None:
-                        image_size = img.shape[:2][::-1]
+                        image_size = image.shape[:2][::-1]
                     
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    marker_corners, marker_ids, rejected = cv2.aruco.detectMarkers(
-                        gray, aruco_dict, parameters=detector_params
-                    )
+                    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                    marker_corners, marker_ids, _ = calibration_plugin.detector.detectMarkers(gray)
                     
-                    if marker_ids is not None and len(marker_ids) > 0:
-                        ret, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-                            marker_corners, marker_ids, gray, board
-                        )
-                        
-                        if ret and charuco_corners is not None and len(charuco_corners) >= 10:
-                            all_charuco_corners.append(charuco_corners)
-                            all_charuco_ids.append(charuco_ids)
-                            processed_images.append({
-                                'filename': img_path.name,
-                                'corners_detected': len(charuco_corners)
-                            })
+                    if marker_ids is None or len(marker_corners) < calibration_plugin.markers_required:
+                        continue
+                    
+                    # Use CharucoDetector for OpenCV 4.7+ compatibility
+                    charuco_detector = cv2.aruco.CharucoDetector(calibration_plugin.board)
+                    charuco_corners, charuco_ids, _, _ = charuco_detector.detectBoard(gray)
+                    retval = len(charuco_corners) if charuco_corners is not None else 0
+                    
+                    if retval > 0:
+                        all_charuco_corners.append(charuco_corners)
+                        all_charuco_ids.append(charuco_ids)
                 
                 if len(all_charuco_corners) < 5:
                     yield f"data: {json_module.dumps({'type': 'error', 'error': f'Not enough valid images. Found {len(all_charuco_corners)} images with patterns, need at least 5.'})}\n\n"
@@ -1704,65 +1698,99 @@ def run_calibration():
                 yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Found {len(all_charuco_corners)} valid images with detected patterns'})}\n\n"
                 sys.stdout.flush()
                 
-                # Calibrate camera
-                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Computing camera parameters...'})}\n\n"
+                # Prepare object and image points
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Preparing calibration data...'})}\n\n"
                 sys.stdout.flush()
                 
-                ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
-                    all_charuco_corners,
-                    all_charuco_ids,
-                    board,
+                all_obj_corners = calibration_plugin.board.getChessboardCorners()
+                obj_points = []
+                img_points = []
+                for corners, ids in zip(all_charuco_corners, all_charuco_ids):
+                    ids_flat = ids.flatten()
+                    obj_pts = all_obj_corners[ids_flat]
+                    obj_points.append(obj_pts)
+                    img_points.append(corners)
+                
+                # Limit to reasonable number of images using spatial diversity
+                max_images = 50
+                if len(obj_points) > max_images:
+                    yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Selecting {max_images} spatially diverse images from {len(obj_points)} total...'})}\n\n"
+                    sys.stdout.flush()
+                    
+                    # Calculate mean corner position for each image (spatial diversity metric)
+                    image_positions = []
+                    for i, corners in enumerate(img_points):
+                        mean_pos = np.mean(corners, axis=0).flatten()  # Average x,y position
+                        image_positions.append((i, mean_pos))
+                    
+                    # K-means clustering to select spatially diverse images
+                    from sklearn.cluster import KMeans
+                    positions = np.array([pos for _, pos in image_positions])
+                    kmeans = KMeans(n_clusters=max_images, random_state=42, n_init=10)
+                    kmeans.fit(positions)
+                    
+                    # Select the image closest to each cluster center
+                    selected_indices = []
+                    for center in kmeans.cluster_centers_:
+                        distances = np.linalg.norm(positions - center, axis=1)
+                        closest_idx = np.argmin(distances)
+                        if closest_idx not in selected_indices:
+                            selected_indices.append(closest_idx)
+                    
+                    # Sort indices to maintain temporal order
+                    selected_indices = sorted(selected_indices[:max_images])
+                    
+                    obj_points = [obj_points[i] for i in selected_indices]
+                    img_points = [img_points[i] for i in selected_indices]
+                    yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Selected {len(obj_points)} spatially diverse images'})}\n\n"
+                    sys.stdout.flush()
+                
+                # Run calibration with optimized flags
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Computing camera parameters from {len(obj_points)} images...'})}\n\n"
+                sys.stdout.flush()
+                
+                # Use flags to speed up calibration
+                flags = cv2.CALIB_RATIONAL_MODEL
+                
+                ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
+                    obj_points,
+                    img_points,
                     image_size,
                     None,
-                    None
+                    None,
+                    flags=flags
                 )
+                
+                yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Calibration computation complete!'})}\n\n"
+                sys.stdout.flush()
                 
                 if not ret:
                     yield f"data: {json_module.dumps({'type': 'error', 'error': 'Calibration failed - unable to compute camera parameters'})}\n\n"
                     return
                 
-                # Calculate reprojection error
+                # Calculate reprojection error (using only the calibrated images)
                 yield f"data: {json_module.dumps({'type': 'progress', 'message': 'Calculating reprojection errors...'})}\n\n"
                 sys.stdout.flush()
                 
                 total_error = 0
                 num_points = 0
-                
-                for i in range(len(all_charuco_corners)):
-                    obj_points = board.getChessboardCorners()[all_charuco_ids[i].flatten()]
-                    img_points, _ = cv2.projectPoints(
-                        obj_points, rvecs[i], tvecs[i], camera_matrix, dist_coeffs
-                    )
-                    error = cv2.norm(all_charuco_corners[i], img_points, cv2.NORM_L2)
+                for i in range(len(obj_points)):
+                    img_pts, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
+                    error = cv2.norm(img_points[i], img_pts, cv2.NORM_L2)
                     total_error += error
-                    num_points += len(all_charuco_corners[i])
+                    num_points += len(obj_points[i])
                 
                 mean_error = total_error / num_points if num_points > 0 else 0
                 
-                # Calculate individual image errors
-                image_errors = []
-                for i in range(len(all_charuco_corners)):
-                    obj_points = board.getChessboardCorners()[all_charuco_ids[i].flatten()]
-                    img_points, _ = cv2.projectPoints(
-                        obj_points, rvecs[i], tvecs[i], camera_matrix, dist_coeffs
-                    )
-                    error = cv2.norm(all_charuco_corners[i], img_points, cv2.NORM_L2) / len(all_charuco_corners[i])
-                    image_errors.append({
-                        'filename': processed_images[i]['filename'],
-                        'error': float(error),
-                        'corners': processed_images[i]['corners_detected']
-                    })
-                
-                # Build results
-                results = {
+                # Build result
+                result = {
                     'success': True,
                     'camera_matrix': camera_matrix.tolist(),
                     'distortion_coeffs': dist_coeffs.flatten().tolist(),
                     'reprojection_error': float(mean_error),
-                    'images_used': len(all_charuco_corners),
-                    'images_total': len(image_files),
+                    'images_used': len(obj_points),
+                    'images_total': len(image_paths),
                     'image_size': list(image_size),
-                    'image_errors': image_errors,
                     'board_config': board_config,
                     'timestamp': datetime.now().isoformat()
                 }
@@ -1773,10 +1801,10 @@ def run_calibration():
                 
                 calibration_file = os.path.join(session_path, 'calibration_results.json')
                 with open(calibration_file, 'w') as f:
-                    json_module.dump(results, f, indent=2)
+                    json_module.dump(result, f, indent=2)
                 
                 # Send final result
-                yield f"data: {json_module.dumps({'type': 'complete', 'result': results})}\n\n"
+                yield f"data: {json_module.dumps({'type': 'complete', 'result': result})}\n\n"
                 sys.stdout.flush()
                 
             except Exception as e:
@@ -2534,8 +2562,10 @@ def stereo_calibrate():
                 if hasattr(cv2, flag_name):
                     cv2_flags |= getattr(cv2, flag_name)
         
-        # Import stereo calibration function
-        from backend.calibration_utils import stereo_calibrate_from_sessions
+        # Get calibration plugin
+        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+        if not calibration_plugin:
+            return jsonify({'success': False, 'error': 'Calibration plugin not available'}), 500
         
         # Progress tracking
         progress_messages = []
@@ -2543,8 +2573,8 @@ def stereo_calibrate():
             progress_messages.append(msg)
             print(f"[Stereo Calibration] {msg}")
         
-        # Run stereo calibration
-        result = stereo_calibrate_from_sessions(
+        # Run stereo calibration using plugin
+        result = calibration_plugin.stereo_calibrate_from_sessions(
             str(camera1_path),
             str(camera2_path),
             board_config,
@@ -2562,8 +2592,7 @@ def stereo_calibrate():
             result['progress'] = progress_messages
             
             # Also compute optimal homography from stereo calibration
-            from backend.calibration_utils import compute_optimal_homography_from_stereo
-            H = compute_optimal_homography_from_stereo(result, tuple(result['image_size']))
+            H = calibration_plugin.compute_optimal_homography_from_stereo(result, tuple(result['image_size']))
             result['optimal_homography'] = H.tolist()
         else:
             result['progress'] = progress_messages

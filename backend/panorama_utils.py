@@ -49,17 +49,18 @@ def detect_charuco_for_panorama(image: np.ndarray, board_config: dict) -> Option
         aruco_dict
     )
     
-    # Detect markers
+    # Detect markers (OpenCV 4.7+ compatible)
     detector_params = cv2.aruco.DetectorParameters()
-    corners, ids, rejected = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=detector_params)
+    aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, detector_params)
+    corners, ids, rejected = aruco_detector.detectMarkers(gray)
     
     if ids is None or len(ids) < 4:
         return None
     
-    # Interpolate ChArUco corners
-    num_corners, charuco_corners, charuco_ids = cv2.aruco.interpolateCornersCharuco(
-        corners, ids, gray, board
-    )
+    # Interpolate ChArUco corners (OpenCV 4.7+ compatible)
+    charuco_detector = cv2.aruco.CharucoDetector(board)
+    charuco_corners, charuco_ids, _, _ = charuco_detector.detectBoard(gray)
+    num_corners = len(charuco_corners) if charuco_corners is not None else 0
     
     if num_corners < 4:
         return None

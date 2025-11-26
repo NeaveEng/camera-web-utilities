@@ -1735,8 +1735,8 @@ async function loadPreviousCalibrationSessions() {
         // Clear existing options except the first one
         select.innerHTML = '<option value="">Start new calibration...</option>';
 
-        if (data.success && data.sessions && data.sessions.length > 0) {
-            data.sessions.forEach(session => {
+        if (data.success && data.session_details && data.session_details.length > 0) {
+            data.session_details.forEach(session => {
                 const option = document.createElement('option');
                 option.value = session.path;
                 option.textContent = `${session.camera_id} - ${session.date} (${session.image_count} images)`;
