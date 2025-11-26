@@ -3639,17 +3639,11 @@ function openPanoramaCalibration() {
     const modal = document.getElementById('panorama-modal');
     modal.classList.add('show');
 
-    // Reset to step 1
-    nextPanoramaStep(1);
-
     // Populate camera selects
     populatePanoramaCameraSelects();
 
     // Load available sessions
     loadPanoramaSessions();
-
-    // Load available calibrations
-    loadPanoramaCalibrationOptions();
 
     // Reset state
     panoramaCalibrationResult = null;
@@ -3663,104 +3657,11 @@ function openPanoramaCalibration() {
         panoramaAutoCaptureInterval = null;
     }
     document.getElementById('panorama-results').style.display = 'none';
+    document.getElementById('panorama-test-btn').style.display = 'none';
+    document.getElementById('panorama-compute-btn').style.display = 'none';
     document.getElementById('panorama-capture-list').innerHTML = '';
     document.getElementById('toggle-panorama-auto-capture').classList.remove('active');
-
-    // Disable next buttons until requirements met
-    const nextToCompute = document.getElementById('panorama-next-to-compute');
-    const nextToReview = document.getElementById('panorama-next-to-review');
-    if (nextToCompute) nextToCompute.disabled = true;
-    if (nextToReview) nextToReview.disabled = true;
-
     updatePanoramaCaptureStatus();
-}
-
-async function loadPanoramaCalibrationOptions() {
-    try {
-        const response = await fetch(`${API_BASE}/api/calibration/sessions`);
-        const data = await response.json();
-
-        const cam1Select = document.getElementById('panorama-cam1-calib-select');
-        const cam2Select = document.getElementById('panorama-cam2-calib-select');
-
-        cam1Select.innerHTML = '<option value="">No calibration</option>';
-        cam2Select.innerHTML = '<option value="">No calibration</option>';
-
-        if (data.success && data.sessions) {
-            console.log(`Loading calibration options from ${data.sessions.length} sessions`);
-
-            // Find sessions with calibration results
-            for (const session of data.sessions) {
-                try {
-                    console.log(`Checking session: ${session}`);
-                    const sessionResp = await fetch(`${API_BASE}/api/calibration/session/${session}`);
-
-                    if (!sessionResp.ok) {
-                        console.warn(`Failed to load session ${session}: ${sessionResp.status}`);
-                        continue;
-                    }
-
-                    const sessionData = await sessionResp.json();
-
-                    if (sessionData.success && sessionData.session) {
-                        const cameraId = sessionData.session.camera_id;
-                        const calibrationResults = sessionData.session.calibration_results;
-
-                        console.log(`Session ${session}: camera_id=${cameraId}, hasCalibration=${!!calibrationResults}`);
-
-                        // Only add sessions that have calibration results
-                        if (calibrationResults && calibrationResults.camera_matrix) {
-                            const option = document.createElement('option');
-                            option.value = session;
-
-                            // Show session name and reprojection error if available
-                            let label = session;
-                            if (calibrationResults.reprojection_error !== undefined) {
-                                const error = calibrationResults.reprojection_error;
-                                label = `${session} (${error.toFixed(3)}px)`;
-                            }
-                            option.textContent = label;
-
-                            console.log(`Adding ${session} to camera ${cameraId} dropdown`);
-
-                            // Add to appropriate camera selector based on camera_id
-                            if (cameraId === '0' || cameraId === 0) {
-                                cam1Select.appendChild(option.cloneNode(true));
-                            } else if (cameraId === '1' || cameraId === 1) {
-                                cam2Select.appendChild(option.cloneNode(true));
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error(`Error loading session ${session}:`, e);
-                }
-            }
-
-            console.log(`Camera 0 calibrations: ${cam1Select.options.length - 1}`);
-            console.log(`Camera 1 calibrations: ${cam2Select.options.length - 1}`);
-        }
-
-        // Auto-select calibrations based on camera selection if available
-        updatePanoramaCalibrationStatus('cam1');
-        updatePanoramaCalibrationStatus('cam2');
-
-    } catch (error) {
-        console.error('Error loading calibration options:', error);
-    }
-}
-
-function updatePanoramaCalibrationStatus(camera) {
-    const selectId = camera === 'cam1' ? 'panorama-cam1-calib-select' : 'panorama-cam2-calib-select';
-    const statusId = camera === 'cam1' ? 'panorama-cam1-calib-status' : 'panorama-cam2-calib-status';
-
-    const select = document.getElementById(selectId);
-    const status = document.getElementById(statusId);
-
-    if (select.value) {
-        status.innerHTML = '✅ <span style="color: #2e7d32;">Calibration selected</span>';
-    } else {
-        status.innerHTML = '❌ <span style="color: #d32f2f;">No calibration selected</span>';
-    }
 }
 
 async function loadPanoramaSessions() {
@@ -3867,39 +3768,6 @@ function closePanoramaCalibration() {
         clearInterval(panoramaPreviewInterval);
         panoramaPreviewInterval = null;
     }
-
-    // Stop all synchronized pairs to release camera resources
-    fetch('/api/sync-pairs/stop-all', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-            console.log('Sync pairs stopped:', data);
-        })
-        .catch(err => {
-            console.error('Error stopping sync pairs:', err);
-        });
-}
-
-function nextPanoramaStep(step) {
-    // Deactivate current step
-    document.querySelectorAll('#panorama-modal .wizard-step').forEach(s => s.classList.remove('active'));
-    document.querySelectorAll('#panorama-modal .wizard-panel').forEach(p => p.classList.remove('active'));
-
-    // Activate new step
-    document.querySelector(`#panorama-modal .wizard-step[data-step="${step}"]`).classList.add('active');
-    document.querySelector(`#panorama-modal .wizard-panel[data-panel="${step}"]`).classList.add('active');
-
-    // Update preview for capture step
-    if (step === 2) {
-        const preview = document.getElementById('panorama-capture-preview');
-        const compositePreview = document.getElementById('panorama-camera-preview-composite');
-        if (compositePreview && compositePreview.src) {
-            preview.src = compositePreview.src;
-        }
-    }
-}
-
-function previousPanoramaStep(step) {
-    nextPanoramaStep(step);
 }
 
 function populatePanoramaCameraSelects() {
@@ -4069,12 +3937,6 @@ function updatePanoramaCaptureStatus() {
         const successCount = panoramaCaptureList.filter(c => c.detected_both).length;
         statusText.textContent = `${panoramaCaptureCount} captures (${successCount} with board detected in both cameras)`;
     }
-
-    // Enable next button if we have enough captures
-    const nextBtn = document.getElementById('panorama-next-to-compute');
-    if (nextBtn) {
-        nextBtn.disabled = panoramaCaptureCount < 5;
-    }
 }
 
 function updatePanoramaCaptureList() {
@@ -4094,99 +3956,34 @@ function updatePanoramaCaptureList() {
 }
 
 async function computePanoramaCalibration() {
-    const useStereo = document.getElementById('panorama-use-stereo').checked;
-    const useOptimalH = document.getElementById('panorama-use-optimal-h').checked;
+    const useCalibration = document.getElementById('panorama-use-calibration').checked;
+    const statusEl = document.getElementById('panorama-detection-status');
 
-    // Use compute status if available, otherwise fall back to detection status
-    const statusEl = document.getElementById('panorama-compute-status') || document.getElementById('panorama-detection-status');
+    statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Computing homography from all captures...</span>';
 
     const computeBtn = document.getElementById('panorama-compute-btn');
     computeBtn.disabled = true;
 
     try {
-        // Step 1: Compute stereo calibration if requested
-        let stereoResult = null;
-        if (useStereo) {
-            // Get selected calibration sessions
-            const cam1CalibSession = document.getElementById('panorama-cam1-calib-select').value;
-            const cam2CalibSession = document.getElementById('panorama-cam2-calib-select').value;
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/compute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: panoramaSessionId,
+                use_calibration: useCalibration
+            })
+        });
 
-            if (!cam1CalibSession || !cam2CalibSession) {
-                statusEl.innerHTML = '<span class="status-icon">❌</span><span class="status-message">Please select calibrations for both cameras</span>';
-                await showAlert('Missing Calibrations', 'Please select calibration sessions for both Camera 0 and Camera 1 before computing stereo calibration.');
-                computeBtn.disabled = false;
-                return;
-            }
+        const result = await response.json();
 
-            statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Computing stereo calibration (extrinsics)...</span>';
-
-            // Get selected calibration flags
-            const flagsSelect = document.getElementById('stereo-calib-flags');
-            const selectedFlags = Array.from(flagsSelect.selectedOptions).map(opt => opt.value);
-            const flagsString = selectedFlags.join('|');
-
-            const stereoResponse = await fetch(`${API_BASE}/api/calibration/stereo/compute`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    session_id: panoramaSessionId,
-                    flags: flagsString,
-                    cam1_calibration_session: cam1CalibSession,
-                    cam2_calibration_session: cam2CalibSession
-                })
-            });
-
-            stereoResult = await stereoResponse.json();
-
-            if (!stereoResult.success) {
-                statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Stereo calibration failed: ${stereoResult.error}</span>`;
-                await showAlert('Stereo Calibration Failed', stereoResult.error);
-                computeBtn.disabled = false;
-                return;
-            }
-
-            // Display stereo results
-            displayStereoResults(stereoResult);
-        }
-
-        // Step 2: Compute homography-based calibration (for comparison or if not using optimal H)
-        if (!useOptimalH || !stereoResult) {
-            statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Computing homography from ChArUco matches...</span>';
-
-            const response = await fetch(`${API_BASE}/api/calibration/panorama/compute`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    session_id: panoramaSessionId,
-                    use_calibration: true  // Always use calibration
-                })
-            });
-
-            const result = await response.json();
-
-            if (result.success) {
-                panoramaCalibrationResult = result;
-                panoramaCalibrationResult.stereo = stereoResult;
-                displayPanoramaResults(result);
-                statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Calibration successful!</span>';
-                document.getElementById('panorama-test-btn').style.display = 'inline-block';
-            } else {
-                statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
-                await showAlert('Homography Calibration Failed', result.error);
-            }
-        } else {
-            // Use optimal homography from stereo calibration
-            panoramaCalibrationResult = {
-                success: true,
-                homography: stereoResult.optimal_homography,
-                stereo: stereoResult,
-                method: 'stereo_optimal',
-                message: 'Using optimal homography computed from stereo calibration'
-            };
-
-            displayPanoramaResults(panoramaCalibrationResult);
-            statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Stereo calibration successful! Using optimal homography.</span>';
+        if (result.success) {
+            panoramaCalibrationResult = result;
+            displayPanoramaResults(result);
+            statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Calibration successful!</span>';
             document.getElementById('panorama-test-btn').style.display = 'inline-block';
+        } else {
+            statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
+            await showAlert('Calibration Failed', result.error);
         }
     } catch (error) {
         console.error('Panorama calibration error:', error);
@@ -4288,140 +4085,51 @@ function stopPanoramaAutoCapture() {
     }
 }
 
-function displayStereoResults(stereoResult) {
-    const resultsDiv = document.getElementById('panorama-results');
-    const contentDiv = document.getElementById('panorama-results-content');
-
-    const R = stereoResult.rotation_matrix;
-    const T = stereoResult.translation_vector;
-
-    // Calculate rotation angles from rotation matrix (approximate Euler angles)
-    const pitch = Math.atan2(-R[2][0], Math.sqrt(R[0][0] ** 2 + R[1][0] ** 2)) * 180 / Math.PI;
-    const yaw = Math.atan2(R[1][0], R[0][0]) * 180 / Math.PI;
-    const roll = Math.atan2(R[2][1], R[2][2]) * 180 / Math.PI;
-
-    // Calculate translation magnitude
-    const translationDist = Math.sqrt(T[0] ** 2 + T[1] ** 2 + T[2] ** 2);
-
-    contentDiv.innerHTML = `
-        <div style="background: #e8f5e9; padding: 12px; border-radius: 4px; margin-bottom: 15px;">
-            <h4 style="margin-top: 0; color: #2e7d32;">🎯 Stereo Calibration Results</h4>
-            
-            <div class="calibration-metrics">
-                <div class="metric-item">
-                    <span class="metric-label">Reprojection Error:</span>
-                    <span class="metric-value">${stereoResult.reprojection_error.toFixed(3)} px</span>
-                </div>
-                <div class="metric-item">
-                    <span class="metric-label">Image Pairs Used:</span>
-                    <span class="metric-value">${stereoResult.pairs_used} / ${stereoResult.pairs_total}</span>
-                </div>
-            </div>
-            
-            <h5 style="margin-top: 15px; margin-bottom: 8px;">Rotation (Euler Angles):</h5>
-            <div style="font-family: monospace; font-size: 0.85em; background: white; padding: 8px; border-radius: 3px;">
-                Pitch: ${pitch.toFixed(2)}°<br>
-                Yaw: ${yaw.toFixed(2)}°<br>
-                Roll: ${roll.toFixed(2)}°
-            </div>
-            
-            <h5 style="margin-top: 12px; margin-bottom: 8px;">Translation Vector:</h5>
-            <div style="font-family: monospace; font-size: 0.85em; background: white; padding: 8px; border-radius: 3px;">
-                X: ${T[0].toFixed(4)}<br>
-                Y: ${T[1].toFixed(4)}<br>
-                Z: ${T[2].toFixed(4)}<br>
-                Distance: ${translationDist.toFixed(4)}
-            </div>
-            
-            <p style="margin-top: 12px; margin-bottom: 0; color: #2e7d32; font-size: 0.9em;">
-                ${stereoResult.reprojection_error < 1.0
-            ? '✅ Excellent stereo calibration! Geometric relationship well-defined.'
-            : stereoResult.reprojection_error < 2.0
-                ? '✅ Good stereo calibration quality.'
-                : '⚠️ Consider capturing more images with better board visibility in both cameras.'}
-            </p>
-        </div>
-    `;
-
-    resultsDiv.style.display = 'block';
-}
-
 function displayPanoramaResults(result) {
     const resultsDiv = document.getElementById('panorama-results');
     const contentDiv = document.getElementById('panorama-results-content');
 
-    // If stereo results already displayed, append homography results
-    let html = '';
+    const metrics = result.metrics;
 
-    if (result.method === 'stereo_optimal') {
-        // Only stereo results, already displayed by displayStereoResults
-        html += `
-            <div style="background: #fff3e0; padding: 12px; border-radius: 4px; margin-top: 10px;">
-                <h4 style="margin-top: 0; color: #e65100;">📐 Optimal Homography</h4>
-                <p style="margin: 0; font-size: 0.9em; color: #555;">
-                    Using geometrically optimal homography computed from stereo calibration rotation matrix.
-                </p>
+    contentDiv.innerHTML = `
+        <div class="calibration-metrics">
+            <div class="metric-item">
+                <span class="metric-label">Total Captures:</span>
+                <span class="metric-value">${result.total_captures}</span>
             </div>
-        `;
-    } else if (result.metrics) {
-        // Homography-based results
-        const metrics = result.metrics;
-
-        html += `
-            <div style="background: #e3f2fd; padding: 12px; border-radius: 4px; ${result.stereo ? 'margin-top: 10px;' : ''}">
-                <h4 style="margin-top: 0; color: #1976d2;">🔗 Homography-Based Calibration</h4>
-                
-                <div class="calibration-metrics">
-                    <div class="metric-item">
-                        <span class="metric-label">Total Captures:</span>
-                        <span class="metric-value">${result.total_captures}</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Successful Captures:</span>
-                        <span class="metric-value">${result.successful_captures}</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Total Matches:</span>
-                        <span class="metric-value">${result.total_matches}</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Inliers:</span>
-                        <span class="metric-value">${metrics.inliers} (${(metrics.inlier_ratio * 100).toFixed(1)}%)</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Mean Error:</span>
-                        <span class="metric-value">${metrics.mean_error.toFixed(3)} px</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">RMSE:</span>
-                        <span class="metric-value">${metrics.rmse.toFixed(3)} px</span>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Max Error:</span>
-                        <span class="metric-value">${metrics.max_error.toFixed(3)} px</span>
-                    </div>
-                </div>
-                <p style="margin-top: 12px; margin-bottom: 0; color: #1976d2; font-size: 0.9em;">
-                    ${metrics.inlier_ratio > 0.7 && metrics.rmse < 2.0
-                ? '✅ Good homography quality! Ready for panorama stitching.'
-                : '⚠️ Homography quality could be improved. Try capturing more images with the board in different positions.'}
-                </p>
+            <div class="metric-item">
+                <span class="metric-label">Successful Captures:</span>
+                <span class="metric-value">${result.successful_captures}</span>
             </div>
-        `;
-    }
+            <div class="metric-item">
+                <span class="metric-label">Total Matches:</span>
+                <span class="metric-value">${result.total_matches}</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Inliers:</span>
+                <span class="metric-value">${metrics.inliers} (${(metrics.inlier_ratio * 100).toFixed(1)}%)</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Mean Error:</span>
+                <span class="metric-value">${metrics.mean_error.toFixed(3)} px</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">RMSE:</span>
+                <span class="metric-value">${metrics.rmse.toFixed(3)} px</span>
+            </div>
+            <div class="metric-item">
+                <span class="metric-label">Max Error:</span>
+                <span class="metric-value">${metrics.max_error.toFixed(3)} px</span>
+            </div>
+        </div>
+        <p style="margin-top: 15px; color: #666;">
+            ${metrics.inlier_ratio > 0.7 && metrics.rmse < 2.0
+            ? '✅ Good calibration quality! Ready for panorama stitching.'
+            : '⚠️ Calibration quality could be improved. Try capturing more images with the board in different positions.'}
+        </p>
+    `;
 
-    if (result.stereo) {
-        html = contentDiv.innerHTML + html;
-    }
-
-    contentDiv.innerHTML = html;
     resultsDiv.style.display = 'block';
-
-    // Enable next button to go to review
-    const nextBtn = document.getElementById('panorama-next-to-review');
-    if (nextBtn) {
-        nextBtn.disabled = false;
-    }
 }
 
 async function testPanoramaStitch() {

@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Streaming Platform</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>🎥 Camera Streaming Platform</h1>
+            <div class="platform-info">
+                <span id="platform-name">Loading...</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Sidebar -->
+            <aside class="sidebar">
+                <!-- Camera Selection -->
+                <section class="panel">
+                    <h2>Cameras</h2>
+                    <div id="camera-list" class="camera-list">
+                        <p>Loading cameras...</p>
+                    </div>
+                    <button id="refresh-cameras" class="btn btn-secondary">
+                        🔄 Refresh
+                    </button>
+                    <button id="sensor-config-btn" class="btn btn-secondary" style="margin-top: 8px;">
+                        ⚙️ Sensor Config
+                    </button>
+                </section>
+
+                <!-- Camera Groups -->
+                <section class="panel">
+                    <h2>Camera Groups</h2>
+                    <div id="group-list" class="group-list">
+                        <p>No groups</p>
+                    </div>
+                    <button id="create-group" class="btn btn-secondary">
+                        ➕ Create Group
+                    </button>
+                </section>
+
+                <!-- Features -->
+                <section class="panel">
+                    <h2>Features</h2>
+                    <div id="feature-list" class="feature-list">
+                        <p>Loading features...</p>
+                    </div>
+                    <button id="calibration-btn" class="btn btn-primary" style="margin-top: 8px;">
+                        📐 Camera Calibration
+                    </button>
+                    <button id="panorama-btn" class="btn btn-primary" style="margin-top: 8px;">
+                        🌄 Panorama Calibration
+                    </button>
+                </section>
+
+                <!-- Workflows -->
+                <section class="panel">
+                    <h2>Workflows</h2>
+                    <div id="workflow-list" class="workflow-list">
+                        <p>Loading workflows...</p>
+                    </div>
+                </section>
+            </aside>
+
+            <!-- Video Grid -->
+            <main class="video-grid-main">
+                <div class="video-container" id="video-0">
+                    <div class="video-wrapper">
+                        <div class="video-header">
+                            <select class="camera-selector" id="selector-0">
+                                <option value="">Select camera...</option>
+                            </select>
+                        </div>
+                        <div class="video-placeholder">
+                            <p>No camera selected</p>
+                        </div>
+                        <div class="video-info">
+                            <span class="camera-name">Slot 0</span>
+                            <span class="camera-status">●</span>
+                        </div>
+                    </div>
+                    <div class="video-controls" id="controls-0">
+                        <div class="no-camera-message">
+                            <p>Select camera to view controls</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="video-container" id="video-1">
+                    <div class="video-wrapper">
+                        <div class="video-header">
+                            <select class="camera-selector" id="selector-1">
+                                <option value="">Select camera...</option>
+                            </select>
+                        </div>
+                        <div class="video-placeholder">
+                            <p>No camera selected</p>
+                        </div>
+                        <div class="video-info">
+                            <span class="camera-name">Slot 1</span>
+                            <span class="camera-status">●</span>
+                        </div>
+                    </div>
+                    <div class="video-controls" id="controls-1">
+                        <div class="no-camera-message">
+                            <p>Select camera to view controls</p>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Create Group Modal -->
+    <div id="create-group-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>Create Camera Group</h2>
+            <form id="create-group-form">
+                <label>
+                    Group Name:
+                    <input type="text" id="group-name" required>
+                </label>
+                <label>
+                    Group Type:
+                    <select id="group-type">
+                        <option value="custom">Custom</option>
+                        <option value="stereo">Stereo Pair</option>
+                        <option value="tri-cam">Tri-Camera</option>
+                    </select>
+                </label>
+                <label>
+                    Cameras:
+                    <div id="group-camera-selection"></div>
+                </label>
+                <button type="submit" class="btn btn-primary">Create Group</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Workflow Modal -->
+    <div id="workflow-modal" class="modal">
+        <div class="modal-content workflow-modal-content">
+            <span class="close">&times;</span>
+            <div id="workflow-content">
+                <!-- Workflow steps will be dynamically inserted here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Calibration Wizard Modal -->
+    <div id="calibration-modal" class="modal">
+        <div class="modal-content calibration-modal-content">
+            <span class="close">&times;</span>
+            <h2>Camera Calibration Wizard</h2>
+
+            <!-- Progress Indicator -->
+            <div class="wizard-progress">
+                <div class="wizard-step active" data-step="1">
+                    <div class="step-number">1</div>
+                    <div class="step-label">Setup</div>
+                </div>
+                <div class="wizard-connector"></div>
+                <div class="wizard-step" data-step="2">
+                    <div class="step-number">2</div>
+                    <div class="step-label">Capture</div>
+                </div>
+                <div class="wizard-connector"></div>
+                <div class="wizard-step" data-step="3">
+                    <div class="step-number">3</div>
+                    <div class="step-label">Calibration</div>
+                </div>
+                <div class="wizard-connector"></div>
+                <div class="wizard-step" data-step="4">
+                    <div class="step-number">4</div>
+                    <div class="step-label">Review</div>
+                </div>
+            </div>
+
+            <!-- Step Content -->
+            <div class="wizard-content">
+                <!-- Step 1: Setup -->
+                <div class="wizard-panel active" data-panel="1">
+                    <h3>Calibration Setup</h3>
+                    <p class="step-description">Configure calibration parameters and select cameras to calibrate.</p>
+
+                    <div class="setup-layout">
+                        <!-- Left side: Camera preview -->
+                        <div class="setup-preview">
+                            <div class="preview-container">
+                                <div class="preview-placeholder" id="setup-preview-placeholder">
+                                    <p>📷 Camera Preview</p>
+                                    <p class="preview-hint">Select a camera to see preview</p>
+                                </div>
+                                <img id="setup-camera-preview"
+                                    style="display: none; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain;">
+                            </div>
+                            <div class="preview-info">
+                                <span id="setup-camera-name">No camera selected</span>
+                            </div>
+                        </div>
+
+                        <!-- Right side: Configuration -->
+                        <div class="setup-config">
+                            <div class="form-group">
+                                <label for="previous-calibration-select">Resume Previous Session:</label>
+                                <select id="previous-calibration-select" class="form-control">
+                                    <option value="">Start new calibration...</option>
+                                </select>
+                                <div id="session-load-progress" style="display: none; margin-top: 8px;">
+                                    <div
+                                        style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                                        <small style="color: #666;">Loading session...</small>
+                                        <small id="session-load-count"
+                                            style="color: #666; font-weight: 500;">0/0</small>
+                                    </div>
+                                    <div
+                                        style="background: #e0e0e0; height: 6px; border-radius: 3px; overflow: hidden;">
+                                        <div id="session-load-bar"
+                                            style="background: linear-gradient(90deg, #4CAF50, #45a049); height: 100%; width: 0%; transition: width 0.2s;">
+                                        </div>
+                                    </div>
+                                </div>
+                                <small class="form-hint">Continue capturing images from a previous session</small>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="calibration-camera-select">Select Camera:</label>
+                                    <select id="calibration-camera-select" class="form-control">
+                                        <option value="">Choose a camera...</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="calibration-model">Calibration Model:</label>
+                                    <select id="calibration-model" class="form-control">
+                                        <option value="pinhole">Standard (Pinhole)</option>
+                                        <option value="fisheye">Fisheye</option>
+                                    </select>
+                                    <small class="form-hint">Use fisheye for wide-angle lenses</small>
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="target-images">Target Images:</label>
+                                <input type="number" id="target-images" class="form-control" value="20" min="10"
+                                    max="100">
+                                <small class="form-hint">Recommended: 20-30 from different angles</small>
+                            </div>
+
+                            <div class="board-config-section">
+                                <h4 style="margin-top: 0; margin-bottom: 12px; color: #667eea; font-size: 1.05em;">📐
+                                    ChArUco Board Configuration</h4>
+
+                                <div class="form-group">
+                                    <label for="board-preset">Board Preset:</label>
+                                    <select id="board-preset" class="form-control">
+                                        <option value="">Custom Configuration</option>
+                                        <option value="default">Default (8x5, 50mm/37mm)</option>
+                                        <option value="large">Large (10x7, 75mm/56mm)</option>
+                                        <option value="small">Small (6x4, 30mm/22mm)</option>
+                                    </select>
+                                    <small class="form-hint">Select a preset or configure custom board below</small>
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="aruco-dictionary">ArUco Dictionary:</label>
+                                    <select id="aruco-dictionary" class="form-control">
+                                        <option value="DICT_4X4_50">DICT_4X4_50</option>
+                                        <option value="DICT_4X4_100">DICT_4X4_100</option>
+                                        <option value="DICT_4X4_250">DICT_4X4_250</option>
+                                        <option value="DICT_4X4_1000">DICT_4X4_1000</option>
+                                        <option value="DICT_5X5_50">DICT_5X5_50</option>
+                                        <option value="DICT_5X5_100">DICT_5X5_100</option>
+                                        <option value="DICT_5X5_250">DICT_5X5_250</option>
+                                        <option value="DICT_5X5_1000">DICT_5X5_1000</option>
+                                        <option value="DICT_6X6_50">DICT_6X6_50</option>
+                                        <option value="DICT_6X6_100" selected>DICT_6X6_100 (default)</option>
+                                        <option value="DICT_6X6_250">DICT_6X6_250</option>
+                                        <option value="DICT_6X6_1000">DICT_6X6_1000</option>
+                                        <option value="DICT_7X7_50">DICT_7X7_50</option>
+                                        <option value="DICT_7X7_100">DICT_7X7_100</option>
+                                        <option value="DICT_7X7_250">DICT_7X7_250</option>
+                                        <option value="DICT_7X7_1000">DICT_7X7_1000</option>
+                                        <option value="DICT_ARUCO_ORIGINAL">DICT_ARUCO_ORIGINAL</option>
+                                    </select>
+                                    <small class="form-hint">Must match your physical board's dictionary</small>
+                                </div>
+
+                                <div
+                                    style="display: grid; grid-template-columns: repeat(4, auto); gap: 12px; justify-content: start;">
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="board-width">Width:</label>
+                                        <input type="number" id="board-width" class="form-control" value="8" min="4"
+                                            max="12" step="1" style="width: 80px; max-width: 80px;">
+                                        <small class="form-hint">Markers (H)</small>
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="board-height">Height:</label>
+                                        <input type="number" id="board-height" class="form-control" value="5" min="3"
+                                            max="10" step="1" style="width: 80px; max-width: 80px;">
+                                        <small class="form-hint">Markers (V)</small>
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="square-length">Square:</label>
+                                        <input type="number" id="square-length" class="form-control" value="50" min="10"
+                                            max="200" step="0.1" style="width: 90px; max-width: 90px;">
+                                        <small class="form-hint">Size (mm)</small>
+                                    </div>
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label for="marker-length">Marker:</label>
+                                        <input type="number" id="marker-length" class="form-control" value="37" min="5"
+                                            max="150" step="0.1" style="width: 90px; max-width: 90px;">
+                                        <small class="form-hint">Size (mm)</small>
+                                    </div>
+                                </div>
+
+                                <div class="board-info"
+                                    style="background: #f0f4ff; padding: 8px 12px; border-radius: 6px; margin-top: 8px;">
+                                    <div
+                                        style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                                        <span style="font-size: 0.85em; color: #555;">
+                                            <strong>Markers:</strong> <span id="board-markers-total">20</span> total,
+                                            <span id="board-markers-required">18</span> required
+                                        </span>
+                                        <span style="font-size: 0.85em; color: #555;">
+                                            <strong>Dictionary:</strong> <span
+                                                id="board-dictionary-display">DICT_6X6_100</span>
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div class="form-group" style="margin-top: 10px; margin-bottom: 0;">
+                                    <button id="generate-board-btn" class="btn btn-secondary" style="width: 100%;">
+                                        🖨️ Generate Board
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Navigation Buttons for Step 1 -->
+                            <div class="wizard-navigation">
+                                <button class="btn btn-secondary wizard-prev" disabled>
+                                    ← Previous
+                                </button>
+                                <button class="btn btn-danger wizard-cancel">
+                                    Cancel
+                                </button>
+                                <button class="btn btn-primary wizard-next">
+                                    Next →
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 2: Capture -->
+                <div class="wizard-panel" data-panel="2">
+                    <h3>Capture Calibration Images</h3>
+                    <p class="step-description">Position the calibration pattern in different orientations and
+                        distances.</p>
+
+                    <div class="calibration-capture-area">
+                        <!-- Left side: Camera preview and thumbnails -->
+                        <div class="capture-left">
+                            <div class="capture-preview" id="capture-preview-container">
+                                <div class="preview-placeholder">
+                                    <p>📷 Camera preview will appear here</p>
+                                    <p class="preview-hint">Camera will start automatically</p>
+                                </div>
+                            </div>
+                            <div class="thumbnail-gallery" id="capture-thumbnails">
+                                <!-- Captured image thumbnails will appear here -->
+                            </div>
+                        </div>
+
+                        <!-- Right side: Controls -->
+                        <div class="capture-controls">
+                            <div class="capture-stats">
+                                <div class="stat-item">
+                                    <span class="stat-label">Images Captured:</span>
+                                    <span class="stat-value" id="images-captured">0</span>
+                                    <span class="stat-target">/ <span id="images-target">20</span></span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Pattern Detected:</span>
+                                    <span class="stat-value" id="pattern-status">❌ No</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Coverage Quality:</span>
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" id="coverage-progress" style="width: 0%"></div>
+                                    </div>
+                                    <span class="stat-value" id="coverage-percent">0%</span>
+                                </div>
+                            </div>
+
+                            <div class="capture-buttons">
+                                <button id="start-capture" class="btn btn-primary">
+                                    ▶️ Start Camera
+                                </button>
+                                <button id="capture-image" class="btn btn-success" disabled>
+                                    📸 Capture Image
+                                </button>
+                                <div style="display: flex; gap: 10px; align-items: center;">
+                                    <button id="toggle-auto-capture" class="btn btn-info" disabled style="flex: 1;">
+                                        🔄 Enable Auto-Capture
+                                    </button>
+                                    <div style="display: flex; flex-direction: column; min-width: 80px;">
+                                        <label for="auto-capture-interval"
+                                            style="font-size: 0.75em; margin-bottom: 2px; color: #666;">Interval
+                                            (s)</label>
+                                        <input type="number" id="auto-capture-interval" class="form-control" value="3"
+                                            min="1" max="10" style="padding: 4px 8px; font-size: 0.9em;">
+                                    </div>
+                                </div>
+                                <button id="clear-captures" class="btn btn-danger">
+                                    🗑️ Clear All
+                                </button>
+                            </div>
+
+                            <div class="coverage-map-section">
+                                <h4>📍 Coverage Map</h4>
+                                <div class="coverage-map-container">
+                                    <div class="coverage-map-placeholder">
+                                        <p>Coverage map will appear here</p>
+                                    </div>
+                                    <canvas id="coverage-map-canvas"></canvas>
+                                </div>
+                            </div>
+
+                            <div class="capture-tips">
+                                <h4>📋 Capture Tips:</h4>
+                                <ul>
+                                    <li>Ensure the entire pattern is visible and in focus</li>
+                                    <li>Capture from multiple angles and distances</li>
+                                    <li>Include images with pattern at frame edges</li>
+                                    <li>Vary the pattern orientation (rotate 90°, 180°)</li>
+                                    <li>Keep the pattern flat and well-lit</li>
+                                </ul>
+                            </div>
+
+                            <!-- Navigation Buttons for Step 2 -->
+                            <div class="wizard-navigation">
+                                <button class="btn btn-secondary wizard-prev">
+                                    ← Previous
+                                </button>
+                                <button class="btn btn-danger wizard-cancel">
+                                    Cancel
+                                </button>
+                                <button class="btn btn-primary wizard-next">
+                                    Next →
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 3: Calibration -->
+                <div class="wizard-panel" data-panel="3">
+                    <h3>Running Calibration</h3>
+                    <p class="step-description">Processing images and calculating camera parameters...</p>
+
+                    <div class="calibration-capture-area">
+                        <!-- Left side: Progress log -->
+                        <div class="calibration-log-container">
+                            <div class="calibration-log" id="calibration-log">
+                                <div class="log-entry">System ready</div>
+                            </div>
+                        </div>
+
+                        <!-- Right side: Status and controls -->
+                        <div class="capture-controls">
+                            <div class="calibration-status">
+                                <div class="status-icon" id="calibration-status-icon">
+                                    ⌛
+                                </div>
+                                <h4 id="calibration-status-text">Ready to calibrate</h4>
+                                <p id="calibration-status-detail">Click "Run Calibration" to begin processing</p>
+                            </div>
+
+                            <div class="progress-container">
+                                <div class="progress-bar large">
+                                    <div class="progress-fill" id="calibration-progress" style="width: 0%"></div>
+                                </div>
+                                <span class="progress-label" id="calibration-progress-label">0%</span>
+                            </div>
+
+                            <details class="advanced-settings">
+                                <summary>⚙️ Advanced Calibration Settings</summary>
+                                <div class="settings-group">
+                                    <div class="checkbox-group">
+                                        <label title="Maintain fixed aspect ratio (fx/fy) during calibration">
+                                            <input type="checkbox" id="calib-fix-aspect-ratio">
+                                            Fix Aspect Ratio
+                                        </label>
+                                        <label title="Keep principal point (cx, cy) at image center">
+                                            <input type="checkbox" id="calib-fix-principal-point">
+                                            Fix Principal Point
+                                        </label>
+                                        <label title="Assume zero tangential distortion (p1=p2=0)">
+                                            <input type="checkbox" id="calib-zero-tangential">
+                                            Zero Tangential Distortion
+                                        </label>
+                                        <label title="Use rational distortion model with k4, k5, k6 coefficients">
+                                            <input type="checkbox" id="calib-rational-model">
+                                            Rational Distortion Model
+                                        </label>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="min-corners-per-image"
+                                            title="Minimum number of detected corners required per image to be used in calibration">
+                                            Min Corners per Image:
+                                        </label>
+                                        <input type="number" id="min-corners-per-image" class="form-control" value="10"
+                                            min="4" max="50">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="min-images-required"
+                                            title="Minimum number of valid images required to perform calibration">
+                                            Min Images Required:
+                                        </label>
+                                        <input type="number" id="min-images-required" class="form-control" value="5"
+                                            min="3" max="50">
+                                    </div>
+                                </div>
+                            </details>
+
+                            <button id="run-calibration" class="btn btn-primary btn-large">
+                                🚀 Run Calibration
+                            </button>
+
+                            <!-- Navigation Buttons for Step 3 -->
+                            <div class="wizard-navigation">
+                                <button class="btn btn-secondary wizard-prev">
+                                    ← Previous
+                                </button>
+                                <button class="btn btn-danger wizard-cancel">
+                                    Cancel
+                                </button>
+                                <button class="btn btn-primary wizard-next">
+                                    Next →
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 4: Review -->
+                <div class="wizard-panel" data-panel="4">
+                    <h3>Calibration Results</h3>
+                    <p class="step-description">Review calibration parameters and save results.</p>
+
+                    <div class="calibration-capture-area">
+                        <!-- Left side: Results data -->\n <div class="results-display">
+                            <div class="result-card">
+                                <h4>📊 Calibration Metrics</h4>
+                                <div class="metric-item">
+                                    <span class="metric-label">Reprojection Error:</span>
+                                    <span class="metric-value" id="result-error">--</span>
+                                    <span class="metric-unit">pixels</span>
+                                </div>
+                                <div class="metric-item">
+                                    <span class="metric-label">Images Used:</span>
+                                    <span class="metric-value" id="result-images">--</span>
+                                </div>
+                                <div class="metric-item">
+                                    <span class="metric-label">Calibration Quality:</span>
+                                    <span class="metric-value quality" id="result-quality">--</span>
+                                </div>
+                            </div>
+
+                            <div class="result-card">
+                                <h4>📷 Camera Matrix</h4>
+                                <div class="matrix-display" id="camera-matrix">
+                                    <code>Loading...</code>
+                                </div>
+                            </div>
+
+                            <div class="result-card">
+                                <h4>📐 Distortion Coefficients</h4>
+                                <div class="matrix-display" id="distortion-coeffs">
+                                    <code>Loading...</code>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Right side: Save options and controls -->
+                        <div class="capture-controls">
+                            <div class="result-card">
+                                <h4>💾 Save Options</h4>
+                                <div class="form-group">
+                                    <label for="calibration-name">Calibration Name:</label>
+                                    <input type="text" id="calibration-name" class="form-control"
+                                        placeholder="e.g., camera_0_20251119">
+                                </div>
+                                <div class="checkbox-group">
+                                    <label>
+                                        <input type="checkbox" id="save-images" checked>
+                                        Save calibration images
+                                    </label>
+                                    <label>
+                                        <input type="checkbox" id="apply-immediately">
+                                        Apply calibration immediately
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="result-actions">
+                                <button id="save-calibration" class="btn btn-success btn-large"
+                                    style="width: 100%; margin-bottom: 10px;">
+                                    💾 Save Calibration
+                                </button>
+                                <button id="export-calibration" class="btn btn-secondary"
+                                    style="width: 100%; margin-bottom: 10px;">
+                                    📤 Export Data
+                                </button>
+                                <button id="recalibrate" class="btn btn-warning" style="width: 100%;">
+                                    🔄 Recalibrate
+                                </button>
+                            </div>
+
+                            <!-- Navigation Buttons for Step 4 -->
+                            <div class="wizard-navigation">
+                                <button class="btn btn-secondary wizard-prev">
+                                    ← Previous
+                                </button>
+                                <button class="btn btn-danger wizard-cancel">
+                                    Cancel
+                                </button>
+                                <button class="btn btn-primary wizard-next">
+                                    Finish
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Dialog Modal -->
+    <div id="confirm-dialog" class="modal">
+        <div class="modal-content confirm-dialog-content">
+            <h3 id="confirm-title">Confirm Action</h3>
+            <p id="confirm-message">Are you sure you want to proceed?</p>
+            <div class="confirm-actions">
+                <button id="confirm-cancel" class="btn btn-secondary">Cancel</button>
+                <button id="confirm-ok" class="btn btn-primary">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Dialog Modal -->
+    <div id="alert-dialog" class="modal">
+        <div class="modal-content alert-dialog-content">
+            <h3 id="alert-title">Alert</h3>
+            <p id="alert-message">This is an alert message.</p>
+            <div class="alert-actions">
+                <button id="alert-ok" class="btn btn-primary">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Panorama Calibration Modal -->
+    <div id="panorama-modal" class="modal">
+        <div class="modal-content calibration-modal-content">
+            <span class="close">&times;</span>
+            <h2>Panorama Calibration</h2>
+            <p class="step-description">Calibrate multiple cameras for panoramic stitching using ChArUco board matching.
+            </p>
+
+            <div class="panorama-wizard">
+                <!-- Two Column Layout -->
+                <div class="panorama-grid">
+                    <!-- Left Column: Settings and Preview -->
+                    <div class="panorama-left-column">
+                        <!-- Session Selection -->
+                        <div class="form-section">
+                            <h3>Session</h3>
+                            <div class="form-row">
+                                <div class="form-group" style="flex: 2;">
+                                    <label for="panorama-session-select">Load Session:</label>
+                                    <select id="panorama-session-select" class="form-control">
+                                        <option value="">New Session</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="panorama-session-name">Session Name:</label>
+                                    <input type="text" id="panorama-session-name" class="form-control"
+                                        placeholder="Auto-generated">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Camera Selection -->
+                        <div class="form-section">
+                            <h3>Camera Selection</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="panorama-camera1-select">Camera 0:</label>
+                                    <select id="panorama-camera1-select" class="form-control">
+                                        <option value="">Choose camera...</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="panorama-camera2-select">Camera 1:</label>
+                                    <select id="panorama-camera2-select" class="form-control">
+                                        <option value="">Choose camera...</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Board Configuration -->
+                        <div class="form-section">
+                            <h3>Board Settings</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="panorama-board-width">Width:</label>
+                                    <input type="number" id="panorama-board-width" class="form-control" value="8"
+                                        min="3">
+                                </div>
+                                <div class="form-group">
+                                    <label for="panorama-board-height">Height:</label>
+                                    <input type="number" id="panorama-board-height" class="form-control" value="5"
+                                        min="3">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="panorama-square-length">Square (mm):</label>
+                                    <input type="number" id="panorama-square-length" class="form-control" value="50"
+                                        min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="panorama-marker-length">Marker (mm):</label>
+                                    <input type="number" id="panorama-marker-length" class="form-control" value="37"
+                                        min="1">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="panorama-aruco-dictionary">Dictionary:</label>
+                                <select id="panorama-aruco-dictionary" class="form-control">
+                                    <option value="DICT_4X4_50">4x4 (50)</option>
+                                    <option value="DICT_4X4_100">4x4 (100)</option>
+                                    <option value="DICT_6X6_50">6x6 (50)</option>
+                                    <option value="DICT_6X6_100" selected>6x6 (100)</option>
+                                    <option value="DICT_6X6_250">6x6 (250)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-use-calibration" checked>
+                                    Use camera calibrations
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Live Preview -->
+                        <div class="form-section">
+                            <h3>Live Preview</h3>
+                            <div
+                                style="margin-bottom: 10px; padding: 6px; background: #e8f5e9; border-left: 3px solid #4caf50; border-radius: 3px;">
+                                <small style="color: #2e7d32;">
+                                    <strong>⚡ Hardware Sync:</strong> &lt;16ms frame sync
+                                </small>
+                            </div>
+                            <div style="text-align: center;">
+                                <div class="preview-placeholder" id="panorama-preview-placeholder"
+                                    style="max-width: 100%;">
+                                    <p>📷 Synchronized Camera Pair</p>
+                                    <p class="preview-hint">Select both cameras</p>
+                                </div>
+                                <img id="panorama-camera-preview-composite"
+                                    style="display: none; width: 100%; height: auto;">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Captures and Actions -->
+                    <div class="panorama-right-column">
+                        <!-- Detection Status -->
+                        <div class="form-section">
+                            <div id="panorama-detection-status" class="calibration-status" style="margin-bottom: 15px;">
+                                <span class="status-icon">ℹ️</span>
+                                <span class="status-message">Position board in overlapping region</span>
+                            </div>
+                        </div>
+
+                        <!-- Captures -->
+                        <div class="form-section">
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <h3 style="margin: 0;">Captures</h3>
+                                <span id="panorama-capture-status-text" style="color: #666; font-size: 0.9em;">0
+                                    captures</span>
+                            </div>
+                            <div id="panorama-capture-list"
+                                style="max-height: 200px; overflow-y: auto; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; padding: 10px; background: #f9f9f9;">
+                                <!-- Capture list will be populated here -->
+                            </div>
+
+                            <!-- Auto-capture settings -->
+                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 15px;">
+                                <button id="toggle-panorama-auto-capture" class="btn btn-toggle"
+                                    title="Auto-capture when board detected">
+                                    🔄 Auto-Capture
+                                </button>
+                                <input type="number" id="panorama-auto-capture-interval" min="1" max="10" value="2"
+                                    style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;"
+                                    title="Seconds between captures">
+                                <span style="color: #666; font-size: 0.9em;">sec</span>
+                            </div>
+                        </div>
+
+                        <!-- Actions -->
+                        <div class="form-section">
+                            <div style="display: flex; flex-direction: column; gap: 10px;">
+                                <button id="panorama-capture-btn" class="btn btn-primary"
+                                    onclick="capturePanoramaCalibration()" style="width: 100%;">
+                                    📸 Capture Image Pair
+                                </button>
+                                <button id="panorama-compute-btn" class="btn btn-success"
+                                    onclick="computePanoramaCalibration()" style="display: none; width: 100%;">
+                                    🧮 Compute Calibration
+                                </button>
+                                <button id="panorama-test-btn" class="btn btn-secondary" onclick="testPanoramaStitch()"
+                                    style="display: none; width: 100%;">
+                                    🖼️ Test Stitch
+                                </button>
+                                <button id="panorama-reset-btn" class="btn btn-secondary"
+                                    onclick="resetPanoramaSession()" style="width: 100%;">
+                                    🔄 Reset Session
+                                </button>
+                                <button class="btn btn-secondary" onclick="closePanoramaCalibration()"
+                                    style="width: 100%;">
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Results -->
+                        <div id="panorama-results" style="display: none;">
+                            <h3>Results</h3>
+                            <div id="panorama-results-content"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    </div>
+
+    <!-- Sensor Config Modal -->
+    <!-- Sensor Configuration Modal -->
+    <div id="sensor-config-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeSensorConfig()">&times;</span>
+            <h2 style="text-align: center;">Sensor FPS Configuration</h2>
+            <p style="color: #666; font-size: 0.9em; margin-bottom: 20px; text-align: center;">
+                Configure the framerate for each resolution based on your camera sensor.
+            </p>
+            <div id="sensor-config-content">
+                <div style="margin-bottom: 20px; display: flex; gap: 10px; align-items: flex-end;">
+                    <div style="flex: 1;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: bold;">Camera Sensor:</label>
+                        <select id="sensor-select" onchange="loadSensorPreset()"
+                            style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 1em;">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <button onclick="showAddSensorForm()" class="btn btn-primary"
+                        style="padding: 10px 16px; white-space: nowrap;">+ New Sensor</button>
+                    <button onclick="deleteSensor()" class="btn btn-danger"
+                        style="padding: 10px 16px; white-space: nowrap;">Delete Sensor</button>
+                </div>
+                <div id="add-sensor-form"
+                    style="display: none; background: #e3f2fd; padding: 15px; border-radius: 4px; margin-bottom: 20px; border: 2px solid #2196F3;">
+                    <h3 style="margin-top: 0;">Create New Sensor</h3>
+                    <label style="display: block; margin-bottom: 8px;">Sensor Name:</label>
+                    <input type="text" id="new-sensor-name" placeholder="e.g., IMX519"
+                        style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px;">
+                    <div style="text-align: right;">
+                        <button onclick="confirmAddSensor()" class="btn btn-primary"
+                            style="margin-right: 10px;">Create</button>
+                        <button onclick="cancelAddSensor()" class="btn btn-secondary">Cancel</button>
+                    </div>
+                </div>
+                <div id="fps-map-list" style="margin-bottom: 20px;"></div>
+                <div style="text-align: center;">
+                    <button onclick="addFpsMapping()" class="btn btn-primary" style="margin-right: 10px;">Add
+                        Resolution</button>
+                    <button onclick="saveSensorConfig()" class="btn btn-primary">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

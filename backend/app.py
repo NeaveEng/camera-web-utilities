@@ -243,7 +243,7 @@ def stop_all_sync_pairs():
 
 @app.route('/api/cameras/<camera_id>/stream')
 def camera_stream(camera_id):
-    """MJPEG stream endpoint for a camera. Checks synchronized pairs first."""
+    """MJPEG stream endpoint for a camera."""
     import cv2
     import numpy as np
     from backend import calibration_utils
@@ -252,98 +252,89 @@ def camera_stream(camera_id):
     
     def generate():
         """Generate MJPEG stream."""
-        # Check if this camera is part of a synchronized pair
-        sync_pair = None
-        for pair in sync_pair_manager.get_all_pairs().values():
-            if pair.is_streaming(camera_id):
-                sync_pair = pair
-                print(f"[Stream] Camera {camera_id} found in synchronized pair")
-                break
-        
-        if sync_pair is None:
-            print(f"[Stream] Camera {camera_id} NOT in synchronized pair, checking regular backend")
-        
-        # Use appropriate backend
-        if sync_pair:
-            # Camera is in a synchronized pair - use pair's preview
-            while sync_pair.is_streaming(camera_id):
-                frame_jpeg = sync_pair.get_preview_frame(camera_id)
-                
-                # If calibration overlay is enabled, decode, draw markers, re-encode
-                if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
-                    try:
-                        # Decode JPEG to numpy array
-                        nparr = np.frombuffer(frame_jpeg, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        
-                        if frame is not None:
-                            # Get calibration plugin
-                            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
-                            if calibration_plugin:
-                                # Configure board if needed
-                                board_config = calibration_board_config.get(camera_id, {})
-                                if board_config:
-                                    calibration_plugin.configure_board(
-                                        width=board_config.get('width', 8),
-                                        height=board_config.get('height', 5),
-                                        square_length=board_config.get('square_length', 50.0),
-                                        marker_length=board_config.get('marker_length', 37.0),
-                                        dictionary=board_config.get('dictionary', 'DICT_6X6_100')
-                                    )
-                                
-                                # Detect pattern directly on preview frame (faster)
-                                detection = calibration_plugin.detect_charuco_pattern(frame)
-                                
-                                # Draw markers on preview frame
-                                if detection.get('detected'):
-                                    try:
-                                        # Draw ArUco markers using OpenCV's built-in function
-                                        if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
-                                            marker_corners = detection['marker_corners']
-                                            marker_ids = detection['marker_ids']
-                                            
-                                            # Draw detected markers directly (no scaling needed)
-                                            cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
+        # Stream directly from camera backend (no sync pairs)
+        while camera_backend.is_streaming(camera_id):
+            frame_jpeg = camera_backend.get_preview_frame(camera_id)
+            
+            if not frame_jpeg:
+                time.sleep(0.033)
+                continue
+            
+            # If calibration overlay is enabled, decode, draw markers, re-encode
+            if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
+                try:
+                    # Decode JPEG to numpy array
+                    nparr = np.frombuffer(frame_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        # Get calibration plugin
+                        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+                        if calibration_plugin:
+                            # Configure board if needed
+                            board_config = calibration_board_config.get(camera_id, {})
+                            if board_config:
+                                calibration_plugin.configure_board(
+                                    width=board_config.get('width', 8),
+                                    height=board_config.get('height', 5),
+                                    square_length=board_config.get('square_length', 50.0),
+                                    marker_length=board_config.get('marker_length', 37.0),
+                                    dictionary=board_config.get('dictionary', 'DICT_6X6_100')
+                                )
+                            
+                            # Detect pattern directly on preview frame (faster)
+                            detection = calibration_plugin.detect_charuco_pattern(frame)
+                            
+                            # Draw markers on preview frame
+                            if detection.get('detected'):
+                                try:
+                                    # Draw ArUco markers using OpenCV's built-in function
+                                    if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
+                                        marker_corners = detection['marker_corners']
+                                        marker_ids = detection['marker_ids']
                                         
-                                        # Draw ChArUco corners
-                                        if detection.get('charuco_corners_array') is not None:
-                                            corners = detection['charuco_corners_array']
-                                            # Reshape to ensure it's 2D array of points
-                                            if corners.ndim == 3:
-                                                corners = corners.reshape(-1, 2)
-                                            for corner in corners:
-                                                # Extract x, y and convert to Python scalars (no scaling needed)
-                                                x = int(corner.flatten()[0])
-                                                y = int(corner.flatten()[1])
-                                                cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
-                                        
-                                        # Draw info overlay
-                                        info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
-                                        cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
-                                        cv2.putText(frame, info_text, (10, 25),
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                                    except Exception as draw_error:
-                                        import traceback
-                                        print(f"Error drawing calibration overlay: {draw_error}")
-                                        traceback.print_exc()
-                        
-                            # Re-encode to JPEG
-                            _, frame_jpeg = cv2.imencode('.jpg', frame)
-                            frame_jpeg = frame_jpeg.tobytes()
-                    except Exception as e:
-                        print(f"Error drawing calibration overlay: {e}")
-                        # Fall through to use original frame
-                
-                # Apply image processing if enabled
-                if frame_jpeg and image_processing_enabled.get(camera_id, False):
-                    try:
-                        # Decode JPEG to numpy array
-                        nparr = np.frombuffer(frame_jpeg, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        
-                        if frame is not None:
-                            processing_config = image_processing_config.get(camera_id, {})
-                            processing_type = processing_config.get('type', 'undistort')
+                                        # Draw detected markers directly (no scaling needed)
+                                        cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
+                                    
+                                    # Draw ChArUco corners
+                                    if detection.get('charuco_corners_array') is not None:
+                                        corners = detection['charuco_corners_array']
+                                        # Reshape to ensure it's 2D array of points
+                                        if corners.ndim == 3:
+                                            corners = corners.reshape(-1, 2)
+                                        for corner in corners:
+                                            # Extract x, y and convert to Python scalars (no scaling needed)
+                                            x = int(corner.flatten()[0])
+                                            y = int(corner.flatten()[1])
+                                            cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
+                                    
+                                    # Draw info overlay
+                                    info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
+                                    cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
+                                    cv2.putText(frame, info_text, (10, 25),
+                                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                except Exception as draw_error:
+                                    import traceback
+                                    print(f"Error drawing calibration overlay: {draw_error}")
+                                    traceback.print_exc()
+                    
+                    # Re-encode to JPEG
+                    _, frame_jpeg = cv2.imencode('.jpg', frame)
+                    frame_jpeg = frame_jpeg.tobytes()
+                except Exception as e:
+                    print(f"Error drawing calibration overlay: {e}")
+                    # Fall through to use original frame
+            
+            # Apply image processing if enabled
+            if frame_jpeg and image_processing_enabled.get(camera_id, False):
+                try:
+                    # Decode JPEG to numpy array
+                    nparr = np.frombuffer(frame_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        processing_config = image_processing_config.get(camera_id, {})
+                        processing_type = processing_config.get('type', 'undistort')
                         
                         if processing_type == 'undistort':
                             # Load calibration data
@@ -418,188 +409,20 @@ def camera_stream(camera_id):
                                 matrix = np.array(matrix_data, dtype=np.float32).reshape(2, 3)
                                 h, w = frame.shape[:2]
                                 frame = cv2.warpAffine(frame, matrix, (w, h))
-                            
-                            # Re-encode to JPEG
-                            _, frame_jpeg = cv2.imencode('.jpg', frame)
-                            frame_jpeg = frame_jpeg.tobytes()
-                    except Exception as e:
-                        print(f"Error applying image processing: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        # Fall through to use original frame
-                
-                if frame_jpeg:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
-                time.sleep(0.033)  # ~30 FPS
-        else:
-            # Camera not in synchronized pair - use regular backend
-            while camera_backend.is_streaming(camera_id):
-                frame_jpeg = camera_backend.get_preview_frame(camera_id)
-                
-                # If calibration overlay is enabled, decode, draw markers, re-encode
-                if frame_jpeg and calibration_overlay_enabled.get(camera_id, False):
-                    try:
-                        # Decode JPEG to numpy array
-                        nparr = np.frombuffer(frame_jpeg, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         
-                        if frame is not None:
-                            # Get calibration plugin
-                            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
-                            if calibration_plugin:
-                                # Configure board if needed
-                                board_config = calibration_board_config.get(camera_id, {})
-                                if board_config:
-                                    calibration_plugin.configure_board(
-                                        width=board_config.get('width', 8),
-                                        height=board_config.get('height', 5),
-                                        square_length=board_config.get('square_length', 50.0),
-                                        marker_length=board_config.get('marker_length', 37.0),
-                                        dictionary=board_config.get('dictionary', 'DICT_6X6_100')
-                                    )
-                                
-                                # Detect pattern directly on preview frame (faster)
-                                detection = calibration_plugin.detect_charuco_pattern(frame)
-                                
-                                # Draw markers on preview frame
-                                if detection.get('detected'):
-                                    try:
-                                        # Draw ArUco markers using OpenCV's built-in function
-                                        if detection.get('marker_corners') is not None and detection.get('marker_ids') is not None:
-                                            marker_corners = detection['marker_corners']
-                                            marker_ids = detection['marker_ids']
-                                            
-                                            # Draw detected markers directly (no scaling needed)
-                                            cv2.aruco.drawDetectedMarkers(frame, marker_corners, marker_ids)
-                                        
-                                        # Draw ChArUco corners
-                                        if detection.get('charuco_corners_array') is not None:
-                                            corners = detection['charuco_corners_array']
-                                            # Reshape to ensure it's 2D array of points
-                                            if corners.ndim == 3:
-                                                corners = corners.reshape(-1, 2)
-                                            for corner in corners:
-                                                # Extract x, y and convert to Python scalars (no scaling needed)
-                                                x = int(corner.flatten()[0])
-                                                y = int(corner.flatten()[1])
-                                                cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
-                                        
-                                        # Draw info overlay
-                                        info_text = f"Markers: {detection.get('markers_detected', 0)} | Corners: {detection.get('corners_detected', 0)} | Q: {detection.get('quality', 'N/A')}"
-                                        cv2.rectangle(frame, (5, 5), (frame.shape[1] - 5, 35), (0, 0, 0), -1)
-                                        cv2.putText(frame, info_text, (10, 25),
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                                    except Exception as draw_error:
-                                            import traceback
-                                            print(f"Error drawing calibration overlay: {draw_error}")
-                                            traceback.print_exc()
-                            
-                            # Re-encode to JPEG
-                            _, frame_jpeg = cv2.imencode('.jpg', frame)
-                            frame_jpeg = frame_jpeg.tobytes()
-                    except Exception as e:
-                        print(f"Error drawing calibration overlay: {e}")
-                        # Fall through to use original frame
-                
-                # Apply image processing if enabled
-                if frame_jpeg and image_processing_enabled.get(camera_id, False):
-                    try:
-                        # Decode JPEG to numpy array
-                        nparr = np.frombuffer(frame_jpeg, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        
-                        if frame is not None:
-                            processing_config = image_processing_config.get(camera_id, {})
-                            processing_type = processing_config.get('type', 'undistort')
-                            
-                            if processing_type == 'undistort':
-                                # Load calibration data
-                                calibration_file = processing_config.get('calibration_file')
-                                if calibration_file and os.path.exists(calibration_file):
-                                    calibration_data = calibration_utils.load_calibration(calibration_file)
-                                    if calibration_data:
-                                        camera_matrix = np.array(calibration_data['camera_matrix'])
-                                        dist_coeffs = np.array(calibration_data['distortion_coeffs'])
-                                        
-                                        # Scale calibration for preview resolution
-                                        # Calibration is done at full resolution, but preview is lower resolution
-                                        h, w = frame.shape[:2]
-                                        original_size = tuple(calibration_data.get('image_size', [w, h]))
-                                        target_size = (w, h)
-                                        
-                                        # Only scale if resolutions differ
-                                        if original_size != target_size:
-                                            camera_matrix, dist_coeffs = calibration_utils.scale_calibration_for_resolution(
-                                                camera_matrix, dist_coeffs, original_size, target_size
-                                            )
-                                        
-                                        # Get alpha parameter (0 = crop all invalid pixels, 1 = keep all pixels)
-                                        alpha = processing_config.get('alpha', 0.0)
-                                        
-                                        # Optionally use optimal camera matrix
-                                        if alpha > 0:
-                                            new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-                                                camera_matrix, dist_coeffs, (w, h), alpha
-                                            )
-                                            frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_matrix)
-                                        else:
-                                            frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
-                            
-                            elif processing_type == 'perspective':
-                                # Apply perspective transformation
-                                src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
-                                dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
-                                
-                                if len(src_points) == 4 and len(dst_points) == 4:
-                                    h, w = frame.shape[:2]
-                                    matrix = cv2.getPerspectiveTransform(src_points, dst_points)
-                                    frame = cv2.warpPerspective(frame, matrix, (w, h))
-                            
-                            elif processing_type == 'affine':
-                                # Apply affine transformation
-                                src_points = np.array(processing_config.get('src_points', []), dtype=np.float32)
-                                dst_points = np.array(processing_config.get('dst_points', []), dtype=np.float32)
-                                
-                                if len(src_points) == 3 and len(dst_points) == 3:
-                                    h, w = frame.shape[:2]
-                                    matrix = cv2.getAffineTransform(src_points, dst_points)
-                                    frame = cv2.warpAffine(frame, matrix, (w, h))
-                            
-                            elif processing_type == 'rotation':
-                                # Apply rotation
-                                angle = processing_config.get('angle', 0.0)
-                                scale = processing_config.get('scale', 1.0)
-                                h, w = frame.shape[:2]
-                                center = (w // 2, h // 2)
-                                matrix = cv2.getRotationMatrix2D(center, angle, scale)
-                                frame = cv2.warpAffine(frame, matrix, (w, h))
-                            
-                            elif processing_type == 'custom_matrix':
-                                # Apply custom transformation matrix
-                                matrix_data = processing_config.get('matrix', [])
-                                if len(matrix_data) == 9:  # 3x3 perspective
-                                    matrix = np.array(matrix_data, dtype=np.float32).reshape(3, 3)
-                                    h, w = frame.shape[:2]
-                                    frame = cv2.warpPerspective(frame, matrix, (w, h))
-                                elif len(matrix_data) == 6:  # 2x3 affine
-                                    matrix = np.array(matrix_data, dtype=np.float32).reshape(2, 3)
-                                    h, w = frame.shape[:2]
-                                    frame = cv2.warpAffine(frame, matrix, (w, h))
-                            
-                            # Re-encode to JPEG
-                            _, frame_jpeg = cv2.imencode('.jpg', frame)
-                            frame_jpeg = frame_jpeg.tobytes()
-                    except Exception as e:
-                        print(f"Error applying image processing: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        # Fall through to use original frame
-                
-                if frame_jpeg:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
-                time.sleep(0.033)  # ~30 FPS
+                        # Re-encode to JPEG
+                        _, frame_jpeg = cv2.imencode('.jpg', frame)
+                        frame_jpeg = frame_jpeg.tobytes()
+                except Exception as e:
+                    print(f"Error applying image processing: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fall through to use original frame
+            
+            if frame_jpeg:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_jpeg + b'\r\n')
+            time.sleep(0.033)  # ~30 FPS
     
     return Response(generate(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')
