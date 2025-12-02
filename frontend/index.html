@@ -743,14 +743,14 @@
                             <h3>Camera Selection</h3>
                             <div class="form-row">
                                 <div class="form-group">
-                                    <label for="panorama-camera1-select">Camera 0:</label>
-                                    <select id="panorama-camera1-select" class="form-control">
+                                    <label for="panorama-camera0-select">Camera 0:</label>
+                                    <select id="panorama-camera0-select" class="form-control">
                                         <option value="">Choose camera...</option>
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <label for="panorama-camera2-select">Camera 1:</label>
-                                    <select id="panorama-camera2-select" class="form-control">
+                                    <label for="panorama-camera1-select">Camera 1:</label>
+                                    <select id="panorama-camera1-select" class="form-control">
                                         <option value="">Choose camera...</option>
                                     </select>
                                 </div>
@@ -799,6 +799,80 @@
                                     <input type="checkbox" id="panorama-use-calibration" checked>
                                     Use camera calibrations
                                 </label>
+                            </div>
+                            <div class="form-group">
+                                <label for="panorama-camera0-calib">Camera 0 Calibration:</label>
+                                <select id="panorama-camera0-calib" class="form-control">
+                                    <option value="">-- Select calibration file --</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="panorama-camera1-calib">Camera 1 Calibration:</label>
+                                <select id="panorama-camera1-calib" class="form-control">
+                                    <option value="">-- Select calibration file --</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Calibration Flags -->
+                        <div class="form-section">
+                            <h3>Calibration Flags</h3>
+                            <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
+                                For stereo calibration (computing extrinsics only):
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-fix-intrinsic" checked>
+                                    Fix intrinsic parameters
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Use pre-calibrated camera matrices and distortion coefficients
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-fix-focal-length">
+                                    Fix focal length
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Keep focal length fixed (fx, fy)
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-fix-principal-point">
+                                    Fix principal point
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Keep principal point fixed (cx, cy)
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-fix-aspect-ratio">
+                                    Fix aspect ratio
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Enforce fx/fy = constant
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-same-focal-length">
+                                    Same focal length
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Both cameras have same focal length
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="panorama-flag-zero-tangent-dist">
+                                    Zero tangential distortion
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    Set tangential distortion (p1, p2) to zero
+                                </small>
                             </div>
                         </div>
 

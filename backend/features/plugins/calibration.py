@@ -565,11 +565,33 @@ class CalibrationPlugin(FeaturePlugin):
         Load calibration from disk.
         
         Args:
-            name: Calibration file name (with or without extension)
+            name: Calibration file name (with or without extension) or path like "session_xxx/camera_id"
             
         Returns:
             Calibration data
         """
+        # Check if name contains a path separator (session/camera format)
+        if '/' in name:
+            # Handle session/camera_id format
+            session_path = self.data_dir / name / "calibration_results.json"
+            if session_path.exists():
+                try:
+                    with open(session_path, 'r') as f:
+                        return {
+                            "success": True,
+                            **json.load(f)
+                        }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Error loading calibration from {session_path}: {str(e)}"
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Calibration file not found: {session_path}"
+                }
+        
         # Try NPZ first
         npz_path = self.data_dir / f"{name}.npz"
         json_path = self.data_dir / f"{name}.json"
@@ -679,13 +701,25 @@ class CalibrationPlugin(FeaturePlugin):
         Load calibration data from a JSON file.
         
         Args:
-            calibration_path: Path to calibration JSON file
+            calibration_path: Path to calibration JSON file (can be relative like "session_xxx/0")
         
         Returns:
             Dictionary with calibration data or None on error
         """
         try:
-            with open(calibration_path, 'r') as f:
+            from pathlib import Path
+            import os
+            
+            # If path contains / and doesn't end with .json, assume it's session/camera_id format
+            if '/' in calibration_path and not calibration_path.endswith('.json'):
+                # Construct full path to calibration_results.json
+                # Go up 3 levels from backend/features/plugins/ to get to root
+                calibration_dir = Path(os.path.dirname(__file__)).resolve() / '..' / '..' / '..' / 'data' / 'calibration'
+                full_path = (calibration_dir / calibration_path / 'calibration_results.json').resolve()
+            else:
+                full_path = Path(calibration_path).resolve()
+            
+            with open(full_path, 'r') as f:
                 calibration_data = json.load(f)
             
             # Convert lists back to numpy arrays for use with OpenCV

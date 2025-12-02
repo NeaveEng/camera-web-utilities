@@ -177,13 +177,21 @@ def calibrate_panorama_pair(image1: np.ndarray, image2: np.ndarray,
     # Undistort images if calibrations provided
     if camera1_calibration:
         camera_matrix1 = np.array(camera1_calibration['camera_matrix'])
-        dist_coeffs1 = np.array(camera1_calibration['dist_coeffs'])
-        image1 = cv2.undistort(image1, camera_matrix1, dist_coeffs1)
+        dist_coeffs1 = np.array(camera1_calibration['distortion_coeffs'])
+        h, w = image1.shape[:2]
+        new_camera_matrix1, roi1 = cv2.getOptimalNewCameraMatrix(
+            camera_matrix1, dist_coeffs1, (w, h), alpha=1.0
+        )
+        image1 = cv2.undistort(image1, camera_matrix1, dist_coeffs1, None, new_camera_matrix1)
     
     if camera2_calibration:
         camera_matrix2 = np.array(camera2_calibration['camera_matrix'])
-        dist_coeffs2 = np.array(camera2_calibration['dist_coeffs'])
-        image2 = cv2.undistort(image2, camera_matrix2, dist_coeffs2)
+        dist_coeffs2 = np.array(camera2_calibration['distortion_coeffs'])
+        h, w = image2.shape[:2]
+        new_camera_matrix2, roi2 = cv2.getOptimalNewCameraMatrix(
+            camera_matrix2, dist_coeffs2, (w, h), alpha=1.0
+        )
+        image2 = cv2.undistort(image2, camera_matrix2, dist_coeffs2, None, new_camera_matrix2)
     
     # Detect ChArUco in both images
     detection1 = detect_charuco_for_panorama(image1, board_config)
@@ -392,7 +400,8 @@ def load_stereo_calibration(camera1_id: str, camera2_id: str,
 def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]],
                                 board_config: dict,
                                 camera1_calibration: Optional[dict] = None,
-                                camera2_calibration: Optional[dict] = None) -> dict:
+                                camera2_calibration: Optional[dict] = None,
+                                stereo_flags: Optional[int] = None) -> dict:
     """
     Calibrate panorama alignment using multiple image pairs for robustness.
     
@@ -401,6 +410,7 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
         board_config: ChArUco board configuration
         camera1_calibration: Optional individual calibration for camera 1
         camera2_calibration: Optional individual calibration for camera 2
+        stereo_flags: Optional OpenCV stereo calibration flags (e.g., cv2.CALIB_FIX_INTRINSIC)
     
     Returns:
         Dictionary with calibration results including averaged homography
@@ -415,28 +425,27 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
     all_points2 = []
     capture_results = []
     
-    # Process each image pair
+    # Process each image pair - detect on ORIGINAL images, don't undistort first!
+    # The calibrations will be used in stereoCalibrate with CALIB_FIX_INTRINSIC flag
     for idx, (image1, image2) in enumerate(image_pairs):
-        # Undistort if calibrations provided
-        if camera1_calibration:
-            camera_matrix1 = np.array(camera1_calibration['camera_matrix'])
-            dist_coeffs1 = np.array(camera1_calibration['dist_coeffs'])
-            image1 = cv2.undistort(image1, camera_matrix1, dist_coeffs1)
-        
-        if camera2_calibration:
-            camera_matrix2 = np.array(camera2_calibration['camera_matrix'])
-            dist_coeffs2 = np.array(camera2_calibration['dist_coeffs'])
-            image2 = cv2.undistort(image2, camera_matrix2, dist_coeffs2)
-        
-        # Detect ChArUco
+        # Detect ChArUco on original (distorted) images
         detection1 = detect_charuco_for_panorama(image1, board_config)
         detection2 = detect_charuco_for_panorama(image2, board_config)
         
         if detection1 is None or detection2 is None:
+            error_msg = 'Board not detected in both cameras'
+            if detection1 is None and detection2 is None:
+                error_msg = 'Board not detected in either camera'
+            elif detection1 is None:
+                error_msg = f'Board not detected in camera 0 (camera 1: {detection2["num_corners"]} corners)'
+            else:
+                error_msg = f'Board not detected in camera 1 (camera 0: {detection1["num_corners"]} corners)'
+            
+            print(f"Capture {idx}: {error_msg}")
             capture_results.append({
                 'capture_idx': idx,
                 'success': False,
-                'error': 'Board not detected in both cameras'
+                'error': error_msg
             })
             continue
         
@@ -483,7 +492,7 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
             'capture_results': capture_results
         }
     
-    return {
+    result = {
         'success': True,
         'homography': H.tolist(),
         'metrics': metrics,
@@ -492,6 +501,121 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
         'total_matches': len(combined_points1),
         'capture_results': capture_results
     }
+    
+    # If stereo flags provided and both cameras have calibration, also compute stereo parameters
+    # This provides R, T matrices which can be useful for understanding camera geometry
+    if stereo_flags is not None and camera1_calibration is not None and camera2_calibration is not None:
+        try:
+            # Prepare object points and image points for stereo calibration
+            # Use the same detected corners from all successful captures
+            object_points_list = []
+            image_points1_list = []
+            image_points2_list = []
+            
+            # Get board parameters
+            squares_x = board_config.get('squares_x', board_config.get('width'))
+            squares_y = board_config.get('squares_y', board_config.get('height'))
+            square_length = board_config['square_length']
+            marker_length = board_config['marker_length']
+            dictionary_name = board_config.get('dictionary', 'DICT_6X6_100')
+            
+            # Create ChArUco board for object point generation
+            aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
+            charuco_board = cv2.aruco.CharucoBoard(
+                (squares_x, squares_y),
+                square_length,
+                marker_length,
+                aruco_dict
+            )
+            
+            # Re-process each successful image pair to get corner IDs and object points
+            for idx, (image1, image2) in enumerate(image_pairs):
+                if not capture_results[idx].get('success', False):
+                    continue
+                
+                # Undistort images
+                camera_matrix1 = np.array(camera1_calibration['camera_matrix'])
+                dist_coeffs1 = np.array(camera1_calibration['distortion_coeffs'])
+                image1_undist = cv2.undistort(image1, camera_matrix1, dist_coeffs1)
+                
+                camera_matrix2 = np.array(camera2_calibration['camera_matrix'])
+                dist_coeffs2 = np.array(camera2_calibration['distortion_coeffs'])
+                image2_undist = cv2.undistort(image2, camera_matrix2, dist_coeffs2)
+                
+                # Detect corners with IDs
+                detection1 = detect_charuco_for_panorama(image1_undist, board_config)
+                detection2 = detect_charuco_for_panorama(image2_undist, board_config)
+                
+                if detection1 is None or detection2 is None:
+                    continue
+                
+                # Find common corner IDs
+                ids1 = detection1['ids'].flatten()
+                ids2 = detection2['ids'].flatten()
+                common_ids = np.intersect1d(ids1, ids2)
+                
+                if len(common_ids) < 4:
+                    continue
+                
+                # Extract matching corners
+                corners1 = []
+                corners2 = []
+                obj_pts = []
+                
+                for corner_id in common_ids:
+                    idx1 = np.where(ids1 == corner_id)[0][0]
+                    idx2 = np.where(ids2 == corner_id)[0][0]
+                    corners1.append(detection1['corners'][idx1])
+                    corners2.append(detection2['corners'][idx2])
+                    
+                    # Get 3D object point for this corner ID
+                    obj_pts.append(charuco_board.getChessboardCorners()[corner_id])
+                
+                object_points_list.append(np.array(obj_pts, dtype=np.float32))
+                image_points1_list.append(np.array(corners1, dtype=np.float32))
+                image_points2_list.append(np.array(corners2, dtype=np.float32))
+            
+            if len(object_points_list) >= 3:
+                # Get image size from first image
+                image_size = (image_pairs[0][0].shape[1], image_pairs[0][0].shape[0])
+                
+                # Run stereo calibration
+                retval, cam_mat1, dist1, cam_mat2, dist2, R, T, E, F = cv2.stereoCalibrate(
+                    object_points_list,
+                    image_points1_list,
+                    image_points2_list,
+                    camera_matrix1,
+                    dist_coeffs1,
+                    camera_matrix2,
+                    dist_coeffs2,
+                    image_size,
+                    flags=stereo_flags
+                )
+                
+                result['stereo_calibration'] = {
+                    'reprojection_error': float(retval),
+                    'rotation_matrix': R.tolist(),
+                    'translation_vector': T.flatten().tolist(),
+                    'essential_matrix': E.tolist(),
+                    'fundamental_matrix': F.tolist(),
+                    'flags_used': stereo_flags,
+                    'pairs_used': len(object_points_list)
+                }
+            else:
+                result['stereo_calibration'] = {
+                    'success': False,
+                    'error': f'Not enough valid pairs for stereo calibration (found {len(object_points_list)}, need 3)'
+                }
+                
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            result['stereo_calibration'] = {
+                'success': False,
+                'error': f'Stereo calibration failed: {str(e)}'
+            }
+    
+    return result
 
 
 def load_panorama_calibration(camera1_id: str, camera2_id: str,
