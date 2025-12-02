@@ -559,7 +559,8 @@
                     <p class="step-description">Review calibration parameters and save results.</p>
 
                     <div class="calibration-capture-area">
-                        <!-- Left side: Results data -->\n <div class="results-display">
+                        <!-- Left side: Results data -->
+                        <div class="results-display">
                             <div class="result-card">
                                 <h4>📊 Calibration Metrics</h4>
                                 <div class="metric-item">
@@ -588,6 +589,43 @@
                                 <h4>📐 Distortion Coefficients</h4>
                                 <div class="matrix-display" id="distortion-coeffs">
                                     <code>Loading...</code>
+                                </div>
+                            </div>
+
+                            <div class="result-card">
+                                <h4>📈 Per-Image Errors</h4>
+                                <div id="image-errors" style="font-size: 0.9em;">
+                                    <p>Loading...</p>
+                                </div>
+                            </div>
+
+                            <div class="result-card">
+                                <h4>🔍 Image Comparison</h4>
+                                <div class="form-group">
+                                    <label for="preview-image-select">Select Image:</label>
+                                    <div style="display: flex; gap: 5px; margin-bottom: 10px;">
+                                        <button id="prev-image-btn" class="btn btn-secondary"
+                                            style="flex: 0 0 40px;">◀</button>
+                                        <select id="preview-image-select" class="form-control" style="flex: 1;">
+                                            <option value="">Loading...</option>
+                                        </select>
+                                        <button id="next-image-btn" class="btn btn-secondary"
+                                            style="flex: 0 0 40px;">▶</button>
+                                    </div>
+                                </div>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                                    <div>
+                                        <p style="text-align: center; margin-bottom: 5px; font-weight: bold;">Original
+                                        </p>
+                                        <canvas id="original-image"
+                                            style="width: 100%; border: 1px solid #ddd; border-radius: 4px;"></canvas>
+                                    </div>
+                                    <div>
+                                        <p style="text-align: center; margin-bottom: 5px; font-weight: bold;">
+                                            Undistorted</p>
+                                        <canvas id="undistorted-image"
+                                            style="width: 100%; border: 1px solid #ddd; border-radius: 4px;"></canvas>
+                                    </div>
                                 </div>
                             </div>
                         </div>

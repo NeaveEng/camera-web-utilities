@@ -3443,12 +3443,12 @@ async function loadCalibrationFiles(cameraId) {
         // Clear existing options
         select.innerHTML = '<option value="">Select calibration...</option>';
 
-        // Get sessions array from response
-        const sessions = data.sessions || [];
+        // Get session details from response
+        const sessions = data.session_details || [];
 
-        // Add sessions that have calibration results
+        // Add sessions that have calibration results for this camera
         for (const session of sessions) {
-            if (session.calibrated) {
+            if (session.calibrated && session.camera_id === cameraId.toString()) {
                 // Construct path: data/calibration/session_name/camera_id/calibration_results.json
                 const calibrationFile = `data/calibration/${session.path}/${session.camera_id}/calibration_results.json`;
                 const option = document.createElement('option');

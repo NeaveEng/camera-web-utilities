@@ -1663,6 +1663,7 @@ def run_calibration():
                 
                 all_charuco_corners = []
                 all_charuco_ids = []
+                valid_image_paths = []  # Track which images had valid detections
                 image_size = None
                 
                 for i, img_path in enumerate(image_paths):
@@ -1690,6 +1691,7 @@ def run_calibration():
                     if retval > 0:
                         all_charuco_corners.append(charuco_corners)
                         all_charuco_ids.append(charuco_ids)
+                        valid_image_paths.append(img_path)  # Track the path of this valid image
                 
                 if len(all_charuco_corners) < 5:
                     yield f"data: {json_module.dumps({'type': 'error', 'error': f'Not enough valid images. Found {len(all_charuco_corners)} images with patterns, need at least 5.'})}\n\n"
@@ -1705,6 +1707,7 @@ def run_calibration():
                 all_obj_corners = calibration_plugin.board.getChessboardCorners()
                 obj_points = []
                 img_points = []
+                
                 for corners, ids in zip(all_charuco_corners, all_charuco_ids):
                     ids_flat = ids.flatten()
                     obj_pts = all_obj_corners[ids_flat]
@@ -1713,6 +1716,8 @@ def run_calibration():
                 
                 # Limit to reasonable number of images using spatial diversity
                 max_images = 50
+                selected_image_paths = valid_image_paths  # Default: use all valid images
+                
                 if len(obj_points) > max_images:
                     yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Selecting {max_images} spatially diverse images from {len(obj_points)} total...'})}\n\n"
                     sys.stdout.flush()
@@ -1742,6 +1747,7 @@ def run_calibration():
                     
                     obj_points = [obj_points[i] for i in selected_indices]
                     img_points = [img_points[i] for i in selected_indices]
+                    selected_image_paths = [valid_image_paths[i] for i in selected_indices]
                     yield f"data: {json_module.dumps({'type': 'progress', 'message': f'Selected {len(obj_points)} spatially diverse images'})}\n\n"
                     sys.stdout.flush()
                 
@@ -1774,11 +1780,25 @@ def run_calibration():
                 
                 total_error = 0
                 num_points = 0
+                image_errors = []
+                
                 for i in range(len(obj_points)):
                     img_pts, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs)
                     error = cv2.norm(img_points[i], img_pts, cv2.NORM_L2)
                     total_error += error
-                    num_points += len(obj_points[i])
+                    num_corners = len(obj_points[i])
+                    num_points += num_corners
+                    
+                    # Calculate per-image error
+                    per_image_error = error / num_corners if num_corners > 0 else 0
+                    
+                    # Get the image filename from the selected paths
+                    image_filename = os.path.basename(selected_image_paths[i])
+                    image_errors.append({
+                        'filename': image_filename,
+                        'error': float(per_image_error),
+                        'corners': num_corners
+                    })
                 
                 mean_error = total_error / num_points if num_points > 0 else 0
                 
@@ -1792,7 +1812,8 @@ def run_calibration():
                     'images_total': len(image_paths),
                     'image_size': list(image_size),
                     'board_config': board_config,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.now().isoformat(),
+                    'image_errors': image_errors
                 }
                 
                 # Save calibration results
@@ -1890,8 +1911,9 @@ def undistort_image_endpoint():
         _, original_buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
         _, undistorted_buffer = cv2.imencode('.jpg', undistorted, [cv2.IMWRITE_JPEG_QUALITY, 85])
         
-        original_base64 = base64.b64encode(original_buffer).decode('utf-8')
-        undistorted_base64 = base64.b64encode(undistorted_buffer).decode('utf-8')
+        # Convert to base64 and remove any newlines
+        original_base64 = base64.b64encode(original_buffer.tobytes()).decode('utf-8').replace('\n', '')
+        undistorted_base64 = base64.b64encode(undistorted_buffer.tobytes()).decode('utf-8').replace('\n', '')
         
         return jsonify({
             'success': True,
