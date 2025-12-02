@@ -3802,10 +3802,13 @@ async function updatePanoramaPreview() {
         panoramaPreviewInterval = null;
     }
 
+    const testCaptureBtn = document.getElementById('panorama-test-capture-btn');
+
     if (!camera1Id || !camera2Id) {
         preview.style.display = 'none';
         placeholder.style.display = 'flex';
         preview.src = '';
+        testCaptureBtn.style.display = 'none';
         return;
     }
 
@@ -3819,6 +3822,7 @@ async function updatePanoramaPreview() {
     preview.src = `${API_BASE}/api/cameras/composite/${camera1Id}/${camera2Id}/stream?t=${Date.now()}`;
     preview.style.display = 'block';
     placeholder.style.display = 'none';
+    testCaptureBtn.style.display = 'inline-block';
 }
 
 async function initializePanoramaPair() {
@@ -4019,6 +4023,126 @@ async function resetPanoramaSession() {
 
     const statusEl = document.getElementById('panorama-detection-status');
     statusEl.innerHTML = '<span class="status-icon">ℹ️</span><span class="status-message">Position ChArUco board visible to both cameras in overlapping region</span>';
+}
+
+async function captureFullResTestImage() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+
+    if (!camera1Id || !camera2Id) {
+        await showAlert('Error', 'Please select both cameras');
+        return;
+    }
+
+    const btn = document.getElementById('panorama-test-capture-btn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '⏳ Capturing...';
+
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/capture-full-res`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                camera1_id: camera1Id,
+                camera2_id: camera2Id,
+                format: 'composite'  // Get the full top-bottom composite
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            // Create a new window/tab to display the full-resolution image
+            const newWindow = window.open('', '_blank');
+            if (newWindow) {
+                newWindow.document.write(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>Full-Res Test Capture - ${camera1Id} & ${camera2Id}</title>
+                        <style>
+                            body {
+                                margin: 0;
+                                padding: 20px;
+                                background: #1e1e1e;
+                                color: #fff;
+                                font-family: Arial, sans-serif;
+                                text-align: center;
+                            }
+                            .info {
+                                margin-bottom: 20px;
+                                padding: 15px;
+                                background: #2d2d2d;
+                                border-radius: 5px;
+                            }
+                            .info h2 {
+                                margin: 0 0 10px 0;
+                            }
+                            .info p {
+                                margin: 5px 0;
+                                color: #aaa;
+                            }
+                            img {
+                                max-width: 100%;
+                                height: auto;
+                                border: 2px solid #444;
+                                border-radius: 5px;
+                            }
+                            .download-btn {
+                                display: inline-block;
+                                margin: 10px;
+                                padding: 10px 20px;
+                                background: #007acc;
+                                color: white;
+                                text-decoration: none;
+                                border-radius: 5px;
+                                cursor: pointer;
+                            }
+                            .download-btn:hover {
+                                background: #005a9e;
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="info">
+                            <h2>🎯 Full-Resolution Synchronized Test Capture</h2>
+                            <p><strong>Cameras:</strong> ${camera1Id} (top) & ${camera2Id} (bottom)</p>
+                            <p><strong>Resolution:</strong> ${result.resolution.width} × ${result.resolution.height}</p>
+                            <p><strong>Format:</strong> Top-Bottom Composite (Hardware Synchronized)</p>
+                            <a class="download-btn" id="download-btn">📥 Download Image</a>
+                        </div>
+                        <img src="${result.composite}" id="test-image" alt="Full-Resolution Test Capture">
+                        <script>
+                            document.getElementById('download-btn').addEventListener('click', function() {
+                                const link = document.createElement('a');
+                                link.href = document.getElementById('test-image').src;
+                                link.download = 'full_res_test_${camera1Id}_${camera2Id}_' + Date.now() + '.jpg';
+                                link.click();
+                            });
+                        </script>
+                    </body>
+                    </html>
+                `);
+                newWindow.document.close();
+            } else {
+                // Fallback: download directly if popup was blocked
+                const link = document.createElement('a');
+                link.href = result.composite;
+                link.download = `full_res_test_${camera1Id}_${camera2Id}_${Date.now()}.jpg`;
+                link.click();
+                await showAlert('Image Captured', 'Full-resolution image downloaded (popup blocked)');
+            }
+        } else {
+            await showAlert('Capture Failed', result.error || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('Full-res capture error:', error);
+        await showAlert('Error', 'Failed to capture: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
 }
 
 function togglePanoramaAutoCapture() {

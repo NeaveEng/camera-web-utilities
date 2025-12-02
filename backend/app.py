@@ -2509,6 +2509,79 @@ def panorama_stitch():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/calibration/panorama/capture-full-res', methods=['POST'])
+def panorama_capture_full_res():
+    """
+    Capture full-resolution test image from synchronized camera pair.
+    Returns the full composite (top-bottom) or individual frames.
+    """
+    import time
+    import cv2
+    import base64
+    
+    try:
+        data = request.json
+        camera1_id = data.get('camera1_id')
+        camera2_id = data.get('camera2_id')
+        format_type = data.get('format', 'composite')  # 'composite', 'separate', or 'both'
+        
+        if not camera1_id or not camera2_id:
+            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        # Get or create synchronized pair
+        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        if sync_pair is None:
+            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            if not sync_pair.start():
+                return jsonify({'success': False, 'error': 'Failed to start camera pair'}), 500
+            # Wait for cameras to warm up
+            time.sleep(0.5)
+        
+        # Get full-resolution composite
+        composite = sync_pair.get_full_composite()
+        
+        if composite is None:
+            return jsonify({'success': False, 'error': 'Failed to capture frames'}), 500
+        
+        response_data = {
+            'success': True,
+            'timestamp': time.time(),
+            'resolution': {
+                'width': composite.shape[1],
+                'height': composite.shape[0]
+            }
+        }
+        
+        if format_type in ['composite', 'both']:
+            # Encode full composite as JPEG
+            success, buffer = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if success:
+                composite_base64 = base64.b64encode(buffer).decode('utf-8')
+                response_data['composite'] = f'data:image/jpeg;base64,{composite_base64}'
+        
+        if format_type in ['separate', 'both']:
+            # Split and encode individual frames
+            height = composite.shape[0] // 2
+            frame1 = composite[:height, :]
+            frame2 = composite[height:, :]
+            
+            success1, buffer1 = cv2.imencode('.jpg', frame1, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            success2, buffer2 = cv2.imencode('.jpg', frame2, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            
+            if success1 and success2:
+                frame1_base64 = base64.b64encode(buffer1).decode('utf-8')
+                frame2_base64 = base64.b64encode(buffer2).decode('utf-8')
+                response_data['frame1'] = f'data:image/jpeg;base64,{frame1_base64}'
+                response_data['frame2'] = f'data:image/jpeg;base64,{frame2_base64}'
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ============================================================================
 # Stereo Calibration - Compute extrinsics between camera pairs
 # ============================================================================
