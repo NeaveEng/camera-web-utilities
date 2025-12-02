@@ -3809,11 +3809,14 @@ async function updatePanoramaPreview() {
         return;
     }
 
-    // Both cameras selected - initialize synchronized pair
+    // Both cameras selected - initialize synchronized pair (which starts the cameras)
     await initializePanoramaPair();
 
-    // Use composite stream from camera 0 (the stream endpoint will return the composite)
-    preview.src = `${API_BASE}/api/cameras/${camera1Id}/stream?t=${Date.now()}`;
+    // Wait a bit for streams to start
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Show composite stream with both cameras side-by-side
+    preview.src = `${API_BASE}/api/cameras/composite/${camera1Id}/${camera2Id}/stream?t=${Date.now()}`;
     preview.style.display = 'block';
     placeholder.style.display = 'none';
 }

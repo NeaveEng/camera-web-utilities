@@ -33,6 +33,11 @@ class SynchronizedCameraPair:
         self.pipeline = None
         self.is_running = False
         
+        # GStreamer appsink references (for polling - headless compatible)
+        self.full_sink1 = None
+        self.full_sink2 = None
+        self.composite_preview = None
+        
         # Frame storage with locks
         self.frames = {
             camera1_id: {
@@ -51,11 +56,15 @@ class SynchronizedCameraPair:
             }
         }
         
+        # Composite preview
+        self.composite_preview_frame = None
+        self.composite_preview_lock = threading.Lock()
+        
         self.config = None
     
     def start(self, width: int = 1920, height: int = 1080, fps: int = 60,
-              preview_width: int = 640, preview_height: int = 360, 
-              preview_quality: int = 85) -> bool:
+              preview_width: int = 960, preview_height: int = 540, 
+              preview_quality: int = 50) -> bool:
         """
         Start synchronized capture from both cameras.
         
@@ -71,7 +80,14 @@ class SynchronizedCameraPair:
             True if started successfully
         """
         if self.is_running:
+            print(f"[SyncPair] Already running, returning True")
             return True
+        
+        # Clean up any existing pipeline first
+        if self.pipeline:
+            print(f"[SyncPair] Found existing pipeline, stopping it first")
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
         
         self.config = {
             'width': width,
@@ -85,73 +101,42 @@ class SynchronizedCameraPair:
         try:
             # Create synchronized dual-camera pipeline
             # Both cameras share the same GStreamer context for hardware sync
+            # Uses NVIDIA hardware compositor and encoder for maximum performance
+            # Simplified: only composite preview output, no full-res branches
             pipeline_str = (
-                # Camera 1
+                # Camera 1 - direct to compositor
                 f'nvarguscamerasrc sensor-id={self.camera1_id} name=src1 '
                 f'wbmode=1 aeantibanding=1 ! '
                 f'video/x-raw(memory:NVMM),width={width},height={height},framerate={fps}/1 ! '
-                f'tee name=t1 '
+                f'nvvidconv flip-method=2 ! '
+                f'video/x-raw(memory:NVMM),width={preview_width},height={preview_height} ! '
+                f'queue ! mix.sink_0 '
                 
-                # Camera 1 full-res branch (rotate 180 degrees)
-                f't1. ! queue max-size-buffers=1 leaky=downstream ! '
-                f'nvvidconv flip-method=2 ! video/x-raw ! videoconvert ! video/x-raw,format=BGR ! '
-                f'appsink name=full_sink1 emit-signals=true max-buffers=1 drop=true '
-                
-                # Camera 1 preview branch (rotate 180 degrees, with label)
-                f't1. ! queue max-size-buffers=1 leaky=downstream ! '
-                f'nvvidconv flip-method=2 ! video/x-raw,width={preview_width},height={preview_height} ! '
-                f'videoconvert ! '
-                f'textoverlay text="Camera {self.camera1_id}" valignment=top halignment=left '
-                f'font-desc="Sans Bold 16" color=0xFF00FF00 ! '
-                f'queue ! comp.sink_0 '
-                
-                # Camera 2
+                # Camera 2 - direct to compositor
                 f'nvarguscamerasrc sensor-id={self.camera2_id} name=src2 '
                 f'wbmode=1 aeantibanding=1 ! '
                 f'video/x-raw(memory:NVMM),width={width},height={height},framerate={fps}/1 ! '
-                f'tee name=t2 '
+                f'nvvidconv flip-method=2 ! '
+                f'video/x-raw(memory:NVMM),width={preview_width},height={preview_height} ! '
+                f'queue ! mix.sink_1 '
                 
-                # Camera 2 full-res branch (rotate 180 degrees)
-                f't2. ! queue max-size-buffers=1 leaky=downstream ! '
-                f'nvvidconv flip-method=2 ! video/x-raw ! videoconvert ! video/x-raw,format=BGR ! '
-                f'appsink name=full_sink2 emit-signals=true max-buffers=1 drop=true '
-                
-                # Camera 2 preview branch (rotate 180 degrees, with label)
-                f't2. ! queue max-size-buffers=1 leaky=downstream ! '
-                f'nvvidconv flip-method=2 ! video/x-raw,width={preview_width},height={preview_height} ! '
-                f'videoconvert ! '
-                f'textoverlay text="Camera {self.camera2_id}" valignment=top halignment=left '
-                f'font-desc="Sans Bold 16" color=0xFF00FF00 ! '
-                f'queue ! comp.sink_1 '
-                
-                # Compositor: side-by-side layout
-                f'compositor name=comp '
-                f'sink_0::xpos=0 sink_0::ypos=0 '
-                f'sink_1::xpos={preview_width} sink_1::ypos=0 ! '
-                f'video/x-raw,width={preview_width*2},height={preview_height} ! '
-                f'jpegenc quality={preview_quality} ! '
-                f'appsink name=composite_preview emit-signals=true max-buffers=1 drop=true'
+                # NVIDIA hardware compositor and encoder
+                f'nvcompositor name=mix '
+                f'sink_0::xpos=0 sink_0::ypos=0 sink_0::width={preview_width} sink_0::height={preview_height} '
+                f'sink_1::xpos={preview_width} sink_1::ypos=0 sink_1::width={preview_width} sink_1::height={preview_height} ! '
+                f'video/x-raw(memory:NVMM),width={preview_width*2},height={preview_height} ! '
+                f'nvvidconv ! '
+                f'video/x-raw,format=I420 ! '
+                f'nvjpegenc quality={preview_quality} ! '
+                f'appsink name=composite_preview emit-signals=true max-buffers=2 drop=true'
             )
             
             self.pipeline = Gst.parse_launch(pipeline_str)
             
-            # Connect callbacks for full-res frames
-            full_sink1 = self.pipeline.get_by_name('full_sink1')
-            full_sink1.connect('new-sample', self._on_full_frame, self.camera1_id)
-            print(f"[SyncPair] Connected full_sink1 to camera {self.camera1_id}")
-            
-            full_sink2 = self.pipeline.get_by_name('full_sink2')
-            full_sink2.connect('new-sample', self._on_full_frame, self.camera2_id)
-            print(f"[SyncPair] Connected full_sink2 to camera {self.camera2_id}")
-            
-            # Connect callback for composite preview
-            composite_preview = self.pipeline.get_by_name('composite_preview')
-            composite_preview.connect('new-sample', self._on_composite_preview)
-            print(f"[SyncPair] Connected composite preview sink")
-            
-            # Store composite preview
-            self.composite_preview_frame = None
-            self.composite_preview_lock = threading.Lock()
+            # Get appsink reference (no full-res sinks in this simplified version)
+            self.composite_preview = self.pipeline.get_by_name('composite_preview')
+            self.full_sink1 = None
+            self.full_sink2 = None
             
             # Start pipeline
             ret = self.pipeline.set_state(Gst.State.PLAYING)
@@ -159,7 +144,16 @@ class SynchronizedCameraPair:
                 print("Failed to start synchronized camera pipeline")
                 return False
             
+            # Check pipeline state
+            state_change, state, pending = self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+            print(f"[SyncPair] Pipeline state: {state}, state_change: {state_change}")
+            
             self.is_running = True
+            
+            # Wait for frames to start flowing (cameras need time to initialize)
+            print(f"[SyncPair] Waiting for cameras to start producing frames...")
+            time.sleep(2.0)
+            
             print(f"Started synchronized camera pair: {self.camera1_id}, {self.camera2_id}")
             return True
             
@@ -187,60 +181,55 @@ class SynchronizedCameraPair:
             print(f"Error stopping synchronized cameras: {e}")
             return False
     
-    def _on_full_frame(self, sink, camera_id):
-        """Callback for new full-resolution frame."""
-        sample = sink.emit('pull-sample')
-        if sample:
-            buffer = sample.get_buffer()
-            caps = sample.get_caps()
-            
-            # Get frame dimensions
-            structure = caps.get_structure(0)
-            width = structure.get_value('width')
-            height = structure.get_value('height')
-            
-            # Map buffer to numpy array
-            success, map_info = buffer.map(Gst.MapFlags.READ)
-            if success:
-                frame = np.ndarray(
-                    shape=(height, width, 3),
-                    dtype=np.uint8,
-                    buffer=map_info.data
-                )
-                
-                # Store frame with timestamp
-                with self.frames[camera_id]['full_frame_lock']:
-                    self.frames[camera_id]['full_frame'] = frame.copy()
-                    self.frames[camera_id]['timestamp'] = time.time()
-                
-                buffer.unmap(map_info)
-        
-        return Gst.FlowReturn.OK
-    
-    def _on_composite_preview(self, sink):
-        """Callback for composite preview frame (JPEG)."""
-        sample = sink.emit('pull-sample')
-        if sample:
-            buffer = sample.get_buffer()
-            success, map_info = buffer.map(Gst.MapFlags.READ)
-            
-            if success:
-                jpeg_data = bytes(map_info.data)
-                
-                with self.composite_preview_lock:
-                    self.composite_preview_frame = jpeg_data
-                
-                buffer.unmap(map_info)
-        
-        return Gst.FlowReturn.OK
-    
     def get_full_frame(self, camera_id: str) -> Optional[np.ndarray]:
-        """Get latest full-resolution frame from specified camera."""
-        if camera_id not in self.frames:
+        """Get latest full-resolution frame from specified camera.
+        
+        Actively pulls from appsink - works on headless systems.
+        """
+        if camera_id not in self.frames or not self.is_running:
             return None
         
-        with self.frames[camera_id]['full_frame_lock']:
-            return self.frames[camera_id]['full_frame']
+        # Determine which sink to use
+        sink = self.full_sink1 if camera_id == self.camera1_id else self.full_sink2
+        if not sink:
+            return None
+        
+        try:
+            # Pull sample from appsink
+            sample = sink.emit('pull-sample')
+            if sample:
+                buffer = sample.get_buffer()
+                caps = sample.get_caps()
+                
+                # Get frame dimensions
+                structure = caps.get_structure(0)
+                width = structure.get_value('width')
+                height = structure.get_value('height')
+                
+                # Map buffer to numpy array
+                success, map_info = buffer.map(Gst.MapFlags.READ)
+                if success:
+                    frame = np.ndarray(
+                        shape=(height, width, 3),
+                        dtype=np.uint8,
+                        buffer=map_info.data
+                    ).copy()
+                    buffer.unmap(map_info)
+                    
+                    # Cache with timestamp
+                    with self.frames[camera_id]['full_frame_lock']:
+                        self.frames[camera_id]['full_frame'] = frame
+                        self.frames[camera_id]['timestamp'] = time.time()
+                    
+                    return frame
+            
+            # Return cached frame if pull failed
+            with self.frames[camera_id]['full_frame_lock']:
+                return self.frames[camera_id]['full_frame']
+                
+        except Exception as e:
+            print(f"[SyncPair] Error pulling full frame from {camera_id}: {e}")
+            return None
     
     def get_full_frame_with_timestamp(self, camera_id: str) -> Optional[Tuple[np.ndarray, float]]:
         """Get latest full-resolution frame with timestamp."""
@@ -284,11 +273,37 @@ class SynchronizedCameraPair:
     def get_preview_frame(self, camera_id: Optional[str] = None) -> Optional[bytes]:
         """Get latest composite preview frame (JPEG) showing both cameras side-by-side.
         
+        Actively pulls from appsink - works on headless systems without display.
         Note: camera_id parameter is ignored - composite always shows both cameras.
-        Kept for API compatibility.
         """
-        with self.composite_preview_lock:
-            return self.composite_preview_frame
+        if not self.is_running or not self.composite_preview:
+            return None
+        
+        try:
+            # Pull latest sample (with drop=true, old frames are discarded)
+            sample = self.composite_preview.emit('pull-sample')
+            
+            if sample:
+                buffer = sample.get_buffer()
+                success, map_info = buffer.map(Gst.MapFlags.READ)
+                if success:
+                    jpeg_data = bytes(map_info.data)
+                    buffer.unmap(map_info)
+                    
+                    # Cache for quick re-use
+                    with self.composite_preview_lock:
+                        self.composite_preview_frame = jpeg_data
+                    
+                    return jpeg_data
+            
+            # Return cached frame if pull failed
+            with self.composite_preview_lock:
+                return self.composite_preview_frame
+                
+        except Exception as e:
+            with self.composite_preview_lock:
+                return self.composite_preview_frame
+            return None
     
     def is_streaming(self, camera_id: str) -> bool:
         """Check if camera is streaming."""

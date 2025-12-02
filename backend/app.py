@@ -427,6 +427,55 @@ def camera_stream(camera_id):
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+@app.route('/api/cameras/composite/<camera1_id>/<camera2_id>/stream')
+def composite_camera_stream(camera1_id, camera2_id):
+    """MJPEG composite stream for two synchronized cameras side-by-side."""
+    import cv2
+    import numpy as np
+    
+    print(f"[Composite Stream] Stream requested for cameras {camera1_id} and {camera2_id}")
+    
+    # Get/create and start synchronized pair BEFORE creating the response
+    # This avoids blocking inside the generator which would prevent HTTP headers from being sent
+    sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+    
+    if sync_pair is None:
+        # If no sync pair, try to create one
+        print(f"[Composite Stream] No existing pair, creating new one")
+        sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+        if sync_pair:
+            print(f"[Composite Stream] Starting new sync pair...")
+            sync_pair.start()
+    elif not sync_pair.is_running:
+        # Pair exists but not running - start it
+        print(f"[Composite Stream] Sync pair exists but not running, starting it")
+        sync_pair.start()
+    
+    if sync_pair is None:
+        print(f"[Composite Stream] Failed to get or create sync pair")
+        return jsonify({"success": False, "error": "Failed to create camera pair"}), 500
+    
+    print(f"[Composite Stream] Sync pair ready, is_running={sync_pair.is_running}")
+    
+    def generate():
+        """Generate composite MJPEG stream."""
+        frame_count = 0
+        
+        while sync_pair.is_running:
+            # Get composite preview frame (already JPEG encoded and side-by-side)
+            composite_jpeg = sync_pair.get_preview_frame()
+            
+            if composite_jpeg:
+                frame_count += 1
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + composite_jpeg + b'\r\n')
+            
+            time.sleep(0.033)  # ~30 FPS
+    
+    return Response(generate(),
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 @app.route('/api/cameras/<camera_id>/controls', methods=['GET'])
 def get_camera_controls(camera_id):
     """Get available controls for a camera."""
@@ -2305,6 +2354,15 @@ def panorama_init_pair():
         
         if not camera1_id or not camera2_id:
             return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
+        
+        # Stop individual camera streams if they're running
+        # (sync pair needs exclusive access to the cameras)
+        if camera_backend.is_streaming(camera1_id):
+            print(f"[Panorama] Stopping individual stream for camera {camera1_id}")
+            camera_backend.stop_stream(camera1_id)
+        if camera_backend.is_streaming(camera2_id):
+            print(f"[Panorama] Stopping individual stream for camera {camera2_id}")
+            camera_backend.stop_stream(camera2_id)
         
         # Get or create synchronized pair
         sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
