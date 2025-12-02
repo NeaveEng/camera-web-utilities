@@ -3612,6 +3612,7 @@ let panoramaCaptureList = [];
 let panoramaAutoCapture = false;
 let panoramaAutoCaptureInterval = null;
 let panoramaLastBoardDetection = { cam1: false, cam2: false };
+let panoramaOverlayEnabled = false;
 
 function initializePanoramaWizard() {
     const panoramaBtn = document.getElementById('panorama-btn');
@@ -3803,12 +3804,14 @@ async function updatePanoramaPreview() {
     }
 
     const testCaptureBtn = document.getElementById('panorama-test-capture-btn');
+    const overlayBtn = document.getElementById('panorama-overlay-toggle-btn');
 
     if (!camera1Id || !camera2Id) {
         preview.style.display = 'none';
         placeholder.style.display = 'flex';
         preview.src = '';
         testCaptureBtn.style.display = 'none';
+        overlayBtn.style.display = 'none';
         return;
     }
 
@@ -3819,10 +3822,50 @@ async function updatePanoramaPreview() {
     await new Promise(resolve => setTimeout(resolve, 500));
 
     // Show composite stream with both cameras side-by-side
-    preview.src = `${API_BASE}/api/cameras/composite/${camera1Id}/${camera2Id}/stream?t=${Date.now()}`;
+    updatePanoramaPreviewStream();
     preview.style.display = 'block';
     placeholder.style.display = 'none';
     testCaptureBtn.style.display = 'inline-block';
+    overlayBtn.style.display = 'inline-block';
+}
+
+function updatePanoramaPreviewStream() {
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const camera2Id = document.getElementById('panorama-camera2-select').value;
+    const preview = document.getElementById('panorama-camera-preview-composite');
+
+    if (!camera1Id || !camera2Id) return;
+
+    if (panoramaOverlayEnabled) {
+        // Get board config for overlay
+        const boardConfig = {
+            board_width: document.getElementById('panorama-board-width').value,
+            board_height: document.getElementById('panorama-board-height').value,
+            square_length: document.getElementById('panorama-square-length').value,
+            marker_length: document.getElementById('panorama-marker-length').value,
+            dictionary: document.getElementById('panorama-aruco-dictionary').value
+        };
+
+        const params = new URLSearchParams(boardConfig);
+        preview.src = `${API_BASE}/api/cameras/composite/${camera1Id}/${camera2Id}/stream-with-overlay?${params}&t=${Date.now()}`;
+    } else {
+        preview.src = `${API_BASE}/api/cameras/composite/${camera1Id}/${camera2Id}/stream?t=${Date.now()}`;
+    }
+}
+
+function togglePanoramaOverlay() {
+    panoramaOverlayEnabled = !panoramaOverlayEnabled;
+    const btn = document.getElementById('panorama-overlay-toggle-btn');
+
+    if (panoramaOverlayEnabled) {
+        btn.classList.add('active');
+        btn.textContent = '👁️ Hide Detection';
+    } else {
+        btn.classList.remove('active');
+        btn.textContent = '👁️ Show Detection';
+    }
+
+    updatePanoramaPreviewStream();
 }
 
 async function initializePanoramaPair() {

@@ -820,7 +820,12 @@
                                 <img id="panorama-camera-preview-composite"
                                     style="display: none; width: 100%; height: auto;">
                             </div>
-                            <div style="text-align: center; margin-top: 10px;">
+                            <div
+                                style="text-align: center; margin-top: 10px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+                                <button id="panorama-overlay-toggle-btn" class="btn btn-toggle"
+                                    onclick="togglePanoramaOverlay()" style="display: none;">
+                                    👁️ Show Detection
+                                </button>
                                 <button id="panorama-test-capture-btn" class="btn btn-secondary"
                                     onclick="captureFullResTestImage()" style="display: none;">
                                     📷 Capture Full-Res Test Image

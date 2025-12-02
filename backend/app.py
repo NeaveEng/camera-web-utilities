@@ -476,6 +476,126 @@ def composite_camera_stream(camera1_id, camera2_id):
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+@app.route('/api/cameras/composite/<camera1_id>/<camera2_id>/stream-with-overlay')
+def composite_camera_stream_with_overlay(camera1_id, camera2_id):
+    """MJPEG composite stream with ChArUco detection overlay for panorama calibration."""
+    import cv2
+    import numpy as np
+    
+    print(f"[Composite Stream Overlay] Stream requested for cameras {camera1_id} and {camera2_id}")
+    
+    # Get board config from query parameters
+    board_width = int(request.args.get('board_width', 8))
+    board_height = int(request.args.get('board_height', 5))
+    square_length = float(request.args.get('square_length', 50))
+    marker_length = float(request.args.get('marker_length', 37))
+    dictionary = request.args.get('dictionary', 'DICT_6X6_100')
+    
+    board_config = {
+        'width': board_width,
+        'height': board_height,
+        'square_length': square_length,
+        'marker_length': marker_length,
+        'dictionary': dictionary
+    }
+    
+    # Get/create and start synchronized pair
+    sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+    
+    if sync_pair is None:
+        print(f"[Composite Stream Overlay] No existing pair, creating new one")
+        sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+        if sync_pair:
+            sync_pair.start()
+    elif not sync_pair.is_running:
+        print(f"[Composite Stream Overlay] Sync pair exists but not running, starting it")
+        sync_pair.start()
+    
+    if sync_pair is None:
+        print(f"[Composite Stream Overlay] Failed to get or create sync pair")
+        return jsonify({"success": False, "error": "Failed to create camera pair"}), 500
+    
+    print(f"[Composite Stream Overlay] Sync pair ready, is_running={sync_pair.is_running}")
+    
+    def generate():
+        """Generate composite MJPEG stream with detection overlay."""
+        from backend.panorama_utils import detect_charuco_for_panorama
+        
+        while sync_pair.is_running:
+            # Get composite preview frame (JPEG encoded)
+            composite_jpeg = sync_pair.get_preview_frame()
+            
+            if composite_jpeg:
+                try:
+                    # Decode JPEG to draw overlay
+                    nparr = np.frombuffer(composite_jpeg, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        # Split side-by-side composite into two frames
+                        height, width = frame.shape[:2]
+                        half_width = width // 2
+                        frame1 = frame[:, :half_width]
+                        frame2 = frame[:, half_width:]
+                        
+                        # Detect in both frames
+                        detection1 = detect_charuco_for_panorama(frame1, board_config)
+                        detection2 = detect_charuco_for_panorama(frame2, board_config)
+                        
+                        # Draw overlays
+                        if detection1:
+                            cv2.aruco.drawDetectedCornersCharuco(
+                                frame1, 
+                                detection1['corners'],
+                                detection1['ids']
+                            )
+                            # Add text indicator
+                            cv2.putText(frame1, f"{detection1['num_corners']} corners", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        else:
+                            cv2.putText(frame1, "No board", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        if detection2:
+                            cv2.aruco.drawDetectedCornersCharuco(
+                                frame2, 
+                                detection2['corners'],
+                                detection2['ids']
+                            )
+                            cv2.putText(frame2, f"{detection2['num_corners']} corners", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        else:
+                            cv2.putText(frame2, "No board", 
+                                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        # Recombine frames
+                        frame[:, :half_width] = frame1
+                        frame[:, half_width:] = frame2
+                        
+                        # Re-encode to JPEG
+                        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        if success:
+                            jpeg_data = buffer.tobytes()
+                            yield (b'--frame\r\n'
+                                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg_data + b'\r\n')
+                    else:
+                        # Fallback to original frame if decode fails
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + composite_jpeg + b'\r\n')
+                        
+                except Exception as e:
+                    print(f"[Composite Stream Overlay] Error processing frame: {e}")
+                    # Fallback to original frame on error
+                    if composite_jpeg:
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + composite_jpeg + b'\r\n')
+            
+            time.sleep(0.033)  # ~30 FPS
+    
+    return Response(generate(),
+                   mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 @app.route('/api/cameras/<camera_id>/controls', methods=['GET'])
 def get_camera_controls(camera_id):
     """Get available controls for a camera."""
