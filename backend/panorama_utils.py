@@ -766,3 +766,529 @@ def load_panorama_calibration(camera1_id: str, camera2_id: str,
             return data
     
     return None
+
+
+def cylindrical_warp(image: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """
+    Warp image to cylindrical coordinates.
+    
+    Args:
+        image: Input image
+        K: Camera intrinsic matrix
+        
+    Returns:
+        Cylindrically warped image
+    """
+    h, w = image.shape[:2]
+    
+    # Get focal length and center from K
+    f = K[0, 0]  # focal length
+    cx = K[0, 2]  # principal point x
+    cy = K[1, 2]  # principal point y
+    
+    # Create coordinate meshgrid for output image
+    y_i, x_i = np.indices((h, w))
+    
+    # Convert to cylindrical coordinates
+    # x' = f * tan((x - cx) / f)
+    # y' = (y - cy) * sqrt(x'^2 + f^2) / f
+    
+    X = (x_i - cx) / f
+    Y = (y_i - cy) / f
+    
+    # Cylindrical projection
+    theta = X
+    h_cyl = Y * np.sqrt(X**2 + 1)
+    
+    # Map back to image coordinates
+    x_src = f * np.tan(theta) + cx
+    y_src = h_cyl * f + cy
+    
+    # Remap the image
+    warped = cv2.remap(image, x_src.astype(np.float32), y_src.astype(np.float32), 
+                       cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    
+    return warped
+
+
+def stitch_panorama_cylindrical(image_left: np.ndarray, image_right: np.ndarray,
+                                rotation_matrix: np.ndarray,
+                                K_left: np.ndarray, K_right: np.ndarray,
+                                blend_width: int = 50) -> np.ndarray:
+    """
+    Create panorama using cylindrical projection with symmetric camera rotation.
+    
+    This approach:
+    1. Projects both images to cylindrical coordinates
+    2. Rotates each camera away from center (symmetric)
+    3. Places them side-by-side with blending
+    
+    Args:
+        image_left: Left camera image
+        image_right: Right camera image
+        rotation_matrix: 3x3 rotation from left to right camera
+        K_left: Left camera intrinsic matrix
+        K_right: Right camera intrinsic matrix
+        blend_width: Blending region width in pixels
+        
+    Returns:
+        Cylindrical panorama
+    """
+    # Convert rotation to axis-angle to get rotation angle
+    rvec, _ = cv2.Rodrigues(rotation_matrix)
+    rotation_angle = np.linalg.norm(rvec)
+    
+    # Each camera rotates half the total angle
+    half_angle = rotation_angle / 2.0
+    
+    print(f"  Cylindrical projection: total rotation {np.degrees(rotation_angle):.1f}°, half angle {np.degrees(half_angle):.1f}°")
+    
+    # Warp both images to cylindrical projection
+    cyl_left = cylindrical_warp(image_left, K_left)
+    cyl_right = cylindrical_warp(image_right, K_right)
+    
+    h, w = cyl_left.shape[:2]
+    
+    # Calculate horizontal shift based on rotation
+    # Each camera sees roughly half_angle * f worth of scene
+    f_left = K_left[0, 0]
+    f_right = K_right[0, 0]
+    
+    # Shift amount (in pixels) for each camera
+    # This creates the panoramic effect
+    shift_left = int(f_left * np.tan(half_angle))
+    shift_right = int(f_right * np.tan(half_angle))
+    
+    # Create output canvas
+    # Width = left image + shift_left + shift_right + right image (minus overlap)
+    overlap = blend_width * 2
+    canvas_width = w + shift_left + shift_right
+    canvas_height = h
+    
+    canvas = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
+    
+    # Place left image (shifted to the left)
+    # The left camera sees the left part of the panorama
+    canvas[:h, :w] = cyl_left
+    
+    # Place right image (shifted to the right)  
+    # The right camera sees the right part of the panorama
+    right_start = shift_left + shift_right
+    canvas[:h, right_start:right_start + w] = cyl_right
+    
+    # Blend in overlap region
+    if blend_width > 0:
+        blend_start = w - blend_width
+        blend_end = right_start + blend_width
+        
+        if blend_start < blend_end and blend_start >= 0:
+            blend_region_width = min(blend_end - blend_start, canvas_width - blend_start)
+            
+            for i in range(blend_region_width):
+                x = blend_start + i
+                if x < canvas_width:
+                    alpha = i / blend_region_width
+                    
+                    # Get pixels from both images at this x position
+                    left_pixel = canvas[:h, x].copy()
+                    
+                    right_x = x - right_start
+                    if 0 <= right_x < w:
+                        right_pixel = cyl_right[:h, right_x]
+                        
+                        # Blend where both have valid data
+                        mask = (left_pixel.sum(axis=1) > 0) & (right_pixel.sum(axis=1) > 0)
+                        canvas[mask, x] = (left_pixel[mask] * (1 - alpha) + 
+                                         right_pixel[mask] * alpha).astype(np.uint8)
+    
+    return canvas
+
+
+def compute_symmetric_rectification(rotation_matrix: np.ndarray, homography: np.ndarray,
+                                    image_shape: Tuple[int, int],
+                                    K_left: Optional[np.ndarray] = None,
+                                    K_right: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute symmetric rectification transforms for panorama stitching.
+    
+    Uses the rotation matrix from extrinsics to create balanced transforms that
+    warp both cameras equally toward a virtual center camera. This creates a
+    symmetric panorama where the baseline between cameras becomes the centerline.
+    
+    Args:
+        rotation_matrix: 3x3 rotation matrix from camera 1 to camera 2 (from extrinsics)
+        homography: 3x3 homography matrix (for fallback/validation)
+        image_shape: (height, width) of input images
+        K_left: Optional 3x3 camera intrinsic matrix for left camera
+        K_right: Optional 3x3 camera intrinsic matrix for right camera
+        
+    Returns:
+        (H_left, H_right): Homography matrices to apply to left and right cameras
+    """
+    import cv2
+    
+    height, width = image_shape
+    
+    # Use provided intrinsics or estimate from image size
+    if K_left is None:
+        # Estimate: focal length ≈ image width
+        focal_length = width
+        cx, cy = width / 2.0, height / 2.0
+        K_left = np.array([
+            [focal_length, 0, cx],
+            [0, focal_length, cy],
+            [0, 0, 1]
+        ], dtype=np.float64)
+    
+    if K_right is None:
+        K_right = K_left.copy()
+    
+    # Convert rotation matrix to Rodrigues rotation vector
+    rvec, _ = cv2.Rodrigues(rotation_matrix)
+    
+    # Create half-rotation for symmetric split
+    # Each camera rotates halfway toward the other
+    rvec_half = rvec / 2.0
+    R_half, _ = cv2.Rodrigues(rvec_half)
+    R_half_inv, _ = cv2.Rodrigues(-rvec_half)
+    
+    # Create rectification homographies
+    # H = K * R * K_inv transforms the image
+    K_left_inv = np.linalg.inv(K_left)
+    K_right_inv = np.linalg.inv(K_right)
+    
+    # Left camera: rotate by -half (toward center)
+    H_left = K_left @ R_half_inv @ K_left_inv
+    
+    # Right camera: rotate by +half (toward center), then apply relative transformation
+    H_right = K_right @ R_half @ K_right_inv @ homography
+    
+    return H_left, H_right
+
+
+def stitch_panorama_symmetric_rectified(image_left: np.ndarray, image_right: np.ndarray,
+                                        rotation_matrix: np.ndarray, homography: np.ndarray,
+                                        blend_width: int = 50,
+                                        K_left: Optional[np.ndarray] = None,
+                                        K_right: Optional[np.ndarray] = None,
+                                        calibration_size: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    """
+    Stitch two images using symmetric rectification based on extrinsics.
+    
+    This creates a geometrically optimal panorama where both cameras are warped
+    equally toward a virtual center camera, resulting in a natural symmetric layout.
+    
+    Args:
+        image_left: Left camera image
+        image_right: Right camera image
+        rotation_matrix: 3x3 rotation from extrinsics (camera 1 to camera 2)
+        homography: 3x3 homography matrix (cam2 to cam1 coordinates)
+        blend_width: Width of blending region in pixels
+        K_left: Optional 3x3 intrinsic matrix for left camera
+        K_right: Optional 3x3 intrinsic matrix for right camera
+        calibration_size: Optional (width, height) at which calibration was performed
+        
+    Returns:
+        Stitched panorama with symmetric rectification
+    """
+    h, w = image_left.shape[:2]
+    
+    # Scale intrinsics and homography if current resolution differs from calibration
+    if calibration_size is not None and K_left is not None and K_right is not None:
+        calib_w, calib_h = calibration_size
+        scale_x = w / calib_w
+        scale_y = h / calib_h
+        
+        if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+            # Scale camera matrices
+            S = np.array([
+                [scale_x, 0, 0],
+                [0, scale_y, 0],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            
+            K_left = S @ K_left
+            K_right = S @ K_right
+            
+            # Scale homography: H' = S * H * S^-1
+            S_inv = np.linalg.inv(S)
+            homography = S @ homography @ S_inv
+    
+    # Compute symmetric rectification transforms
+    H_left, H_right = compute_symmetric_rectification(
+        rotation_matrix, homography, (h, w), K_left, K_right
+    )
+    
+    # Find output canvas size by warping image corners
+    corners = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
+    
+    corners_left_warped = cv2.perspectiveTransform(corners, H_left)
+    corners_right_warped = cv2.perspectiveTransform(corners, H_right)
+    
+    all_corners = np.concatenate([corners_left_warped, corners_right_warped], axis=0)
+    
+    [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel() - 0.5)
+    [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
+    
+    # Translation to keep everything visible
+    translation = np.array([
+        [1, 0, -x_min],
+        [0, 1, -y_min],
+        [0, 0, 1]
+    ], dtype=np.float64)
+    
+    output_width = x_max - x_min
+    output_height = y_max - y_min
+    
+    # Warp both images
+    warped_left = cv2.warpPerspective(
+        image_left,
+        translation @ H_left,
+        (output_width, output_height),
+        flags=cv2.INTER_LINEAR
+    )
+    
+    warped_right = cv2.warpPerspective(
+        image_right,
+        translation @ H_right,
+        (output_width, output_height),
+        flags=cv2.INTER_LINEAR
+    )
+    
+    # Alpha blending in overlap region
+    if blend_width > 0:
+        mask_left = (warped_left.sum(axis=2) > 0).astype(np.uint8)
+        mask_right = (warped_right.sum(axis=2) > 0).astype(np.uint8)
+        
+        overlap = (mask_left & mask_right) > 0
+        
+        if overlap.any():
+            # Distance transform for smooth blending
+            dist_left = cv2.distanceTransform(mask_left, cv2.DIST_L2, 5).astype(np.float32)
+            dist_right = cv2.distanceTransform(mask_right, cv2.DIST_L2, 5).astype(np.float32)
+            
+            # Compute blending weights
+            total_dist = dist_left + dist_right + 1e-10
+            alpha_left = (dist_left / total_dist)[:, :, np.newaxis]
+            alpha_right = (dist_right / total_dist)[:, :, np.newaxis]
+            
+            # Blend
+            overlap_mask = overlap[:, :, np.newaxis]
+            panorama = (
+                warped_left.astype(np.float32) * alpha_left * overlap_mask +
+                warped_right.astype(np.float32) * alpha_right * overlap_mask +
+                warped_left.astype(np.float32) * (1 - overlap_mask) * (mask_left[:, :, np.newaxis] > 0) +
+                warped_right.astype(np.float32) * (1 - overlap_mask) * (mask_right[:, :, np.newaxis] > 0)
+            )
+            panorama = panorama.astype(np.uint8)
+        else:
+            panorama = np.maximum(warped_left, warped_right)
+    else:
+        panorama = np.maximum(warped_left, warped_right)
+    
+    return panorama
+
+
+def stitch_panorama_symmetric(image_left: np.ndarray, image_right: np.ndarray,
+                              homography: np.ndarray, blend_width: int = 50) -> np.ndarray:
+    """
+    Stitch two images into a symmetric panorama where both images are warped equally.
+    
+    This creates a balanced panorama with the centerline between cameras in the middle.
+    Both cameras contribute equally to the final result, unlike asymmetric stitching
+    where one camera is the anchor.
+    
+    Args:
+        image_left: Left camera image
+        image_right: Right camera image  
+        homography: 3x3 homography matrix mapping right to left coordinates
+        blend_width: Width of the blending region in pixels
+        
+    Returns:
+        Stitched panorama with symmetric layout
+    """
+    h_left, w_left = image_left.shape[:2]
+    h_right, w_right = image_right.shape[:2]
+    
+    # Find where right image corners map to in left image space
+    corners_right = np.array([[0, 0], [w_right, 0], [w_right, h_right], [0, h_right]], 
+                            dtype=np.float32).reshape(-1, 1, 2)
+    corners_right_in_left = cv2.perspectiveTransform(corners_right, homography)
+    
+    # Get all corners in left coordinate system
+    corners_left = np.array([[0, 0], [w_left, 0], [w_left, h_left], [0, h_left]], 
+                           dtype=np.float32).reshape(-1, 1, 2)
+    all_corners = np.concatenate([corners_left, corners_right_in_left], axis=0)
+    
+    # Find bounding box
+    [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel() - 0.5)
+    [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
+    
+    # Calculate center point in the combined space
+    x_center = (x_min + x_max) / 2
+    y_center = (y_min + y_max) / 2
+    
+    # Calculate how much to shift to center the panorama
+    # We want the midpoint between the two cameras to be in the center
+    output_width = x_max - x_min
+    output_height = y_max - y_min
+    
+    # Create symmetric transformation: shift so center is at origin, then shift to canvas center
+    center_offset_x = output_width / 2 - x_center
+    center_offset_y = output_height / 2 - y_center
+    
+    # Translation matrix to center the panorama
+    translation = np.array([[1, 0, -x_min + center_offset_x],
+                           [0, 1, -y_min + center_offset_y],
+                           [0, 0, 1]], dtype=np.float64)
+    
+    # Warp both images with the centering translation
+    warped_left = cv2.warpPerspective(
+        image_left,
+        translation,
+        (output_width, output_height),
+        flags=cv2.INTER_LINEAR
+    )
+    
+    warped_right = cv2.warpPerspective(
+        image_right,
+        translation @ homography,
+        (output_width, output_height),
+        flags=cv2.INTER_LINEAR
+    )
+    
+    # Create alpha blending
+    if blend_width > 0:
+        # Create masks
+        mask_left = (warped_left.sum(axis=2) > 0).astype(np.uint8)
+        mask_right = (warped_right.sum(axis=2) > 0).astype(np.uint8)
+        
+        # Find overlap
+        overlap = (mask_left & mask_right) > 0
+        
+        if overlap.any():
+            # Distance transforms for smooth blending
+            dist_left = cv2.distanceTransform(mask_left, cv2.DIST_L2, 5).astype(np.float32)
+            dist_right = cv2.distanceTransform(mask_right, cv2.DIST_L2, 5).astype(np.float32)
+            
+            # Normalize in overlap region
+            total_dist = dist_left + dist_right + 1e-10
+            alpha_left = (dist_left / total_dist)[:, :, np.newaxis]
+            alpha_right = (dist_right / total_dist)[:, :, np.newaxis]
+            
+            # Blend
+            overlap_3ch = overlap[:, :, np.newaxis]
+            panorama = (
+                warped_left.astype(np.float32) * alpha_left * overlap_3ch +
+                warped_right.astype(np.float32) * alpha_right * overlap_3ch +
+                warped_left.astype(np.float32) * (1 - overlap_3ch) * (mask_left[:, :, np.newaxis] > 0) +
+                warped_right.astype(np.float32) * (1 - overlap_3ch) * (mask_right[:, :, np.newaxis] > 0)
+            )
+            panorama = panorama.astype(np.uint8)
+        else:
+            # No overlap, just combine
+            panorama = np.maximum(warped_left, warped_right)
+    else:
+        # No blending
+        panorama = np.maximum(warped_left, warped_right)
+    
+    return panorama
+
+
+def stitch_panorama(image1: np.ndarray, image2: np.ndarray, 
+                    homography: np.ndarray, blend_width: int = 50) -> np.ndarray:
+    """
+    Stitch two images into a panorama using a homography matrix.
+    
+    Args:
+        image1: First image (left/base image)
+        image2: Second image (right image to be warped)
+        homography: 3x3 homography matrix that maps image2 to image1 coordinates
+        blend_width: Width of the blending region in pixels
+    
+    Returns:
+        Stitched panorama image
+    """
+    h1, w1 = image1.shape[:2]
+    h2, w2 = image2.shape[:2]
+    
+    # Get corners of image2 in its own coordinate system
+    corners2 = np.float32([[0, 0], [w2, 0], [w2, h2], [0, h2]]).reshape(-1, 1, 2)
+    
+    # Transform corners to image1 coordinate system
+    corners2_transformed = cv2.perspectiveTransform(corners2, homography)
+    
+    # Combine with image1 corners to get the full panorama bounds
+    corners1 = np.float32([[0, 0], [w1, 0], [w1, h1], [0, h1]]).reshape(-1, 1, 2)
+    all_corners = np.concatenate([corners1, corners2_transformed], axis=0)
+    
+    # Get bounding box
+    [x_min, y_min] = np.int32(all_corners.min(axis=0).ravel() - 0.5)
+    [x_max, y_max] = np.int32(all_corners.max(axis=0).ravel() + 0.5)
+    
+    # Translation to keep all pixels in view
+    translation = np.array([[1, 0, -x_min],
+                           [0, 1, -y_min],
+                           [0, 0, 1]])
+    
+    # Output size
+    output_width = x_max - x_min
+    output_height = y_max - y_min
+    
+    # Warp image2 to panorama coordinates
+    warped_image2 = cv2.warpPerspective(
+        image2,
+        translation @ homography,
+        (output_width, output_height)
+    )
+    
+    # Place image1 in panorama coordinates
+    panorama = cv2.warpPerspective(
+        image1,
+        translation,
+        (output_width, output_height)
+    )
+    
+    # Create alpha blending mask
+    if blend_width > 0:
+        # Create mask for warped_image2
+        mask2 = (warped_image2.sum(axis=2) > 0).astype(np.float32)
+        
+        # Create mask for panorama (image1)
+        mask1 = (panorama.sum(axis=2) > 0).astype(np.float32)
+        
+        # Find overlap region
+        overlap = (mask1 * mask2) > 0
+        
+        if overlap.any():
+            # Create distance transforms for alpha blending
+            # Distance from edge of each image
+            dist1 = cv2.distanceTransform((mask1 > 0).astype(np.uint8), cv2.DIST_L2, 5)
+            dist2 = cv2.distanceTransform((mask2 > 0).astype(np.uint8), cv2.DIST_L2, 5)
+            
+            # Normalize distances in overlap region
+            alpha1 = dist1 / (dist1 + dist2 + 1e-10)
+            alpha2 = dist2 / (dist1 + dist2 + 1e-10)
+            
+            # Apply feathering only in overlap region
+            alpha1 = np.expand_dims(alpha1, axis=2)
+            alpha2 = np.expand_dims(alpha2, axis=2)
+            
+            # Blend in overlap region
+            overlap_mask = np.expand_dims(overlap.astype(np.float32), axis=2)
+            panorama = (panorama * alpha1 * overlap_mask + 
+                       warped_image2 * alpha2 * overlap_mask +
+                       panorama * (1 - overlap_mask) * mask1[:,:,np.newaxis] +
+                       warped_image2 * (1 - overlap_mask) * mask2[:,:,np.newaxis])
+            panorama = panorama.astype(np.uint8)
+        else:
+            # No overlap, just combine
+            mask2_3ch = np.stack([mask2, mask2, mask2], axis=2) > 0
+            panorama[mask2_3ch] = warped_image2[mask2_3ch]
+    else:
+        # No blending, simple overlay
+        mask2 = (warped_image2.sum(axis=2) > 0)
+        mask2_3ch = np.stack([mask2, mask2, mask2], axis=2)
+        panorama[mask2_3ch] = warped_image2[mask2_3ch]
+    
+    return panorama

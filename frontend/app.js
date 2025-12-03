@@ -3627,6 +3627,12 @@ function initializePanoramaWizard() {
     // Close modal
     closeBtn.addEventListener('click', closePanoramaCalibration);
 
+    // Live panorama button
+    const livePanoramaBtn = document.getElementById('live-panorama-btn');
+    if (livePanoramaBtn) {
+        livePanoramaBtn.addEventListener('click', openLivePanoramaModal);
+    }
+
     // Session selection listener
     document.getElementById('panorama-session-select').addEventListener('change', onPanoramaSessionChange);
 
@@ -4679,8 +4685,13 @@ function displayPanoramaResults(result) {
 }
 
 async function testPanoramaStitch() {
+    if (!panoramaSessionId) {
+        await showAlert('Error', 'No active panorama session');
+        return;
+    }
+
+    const camera0Id = document.getElementById('panorama-camera0-select').value;
     const camera1Id = document.getElementById('panorama-camera1-select').value;
-    const camera2Id = document.getElementById('panorama-camera2-select').value;
 
     const statusEl = document.getElementById('panorama-detection-status');
     statusEl.innerHTML = '<span class="status-icon">⏳</span><span class="status-message">Generating stitched preview...</span>';
@@ -4690,8 +4701,9 @@ async function testPanoramaStitch() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+                session_id: panoramaSessionId,
+                camera0_id: camera0Id,
                 camera1_id: camera1Id,
-                camera2_id: camera2Id,
                 blend_width: 50
             })
         });
@@ -4701,6 +4713,7 @@ async function testPanoramaStitch() {
         if (result.success) {
             const stitchImage = document.getElementById('panorama-stitch-image');
             stitchImage.src = result.image;
+            document.getElementById('panorama-live-btn').style.display = 'inline-block';
             statusEl.innerHTML = '<span class="status-icon">✅</span><span class="status-message">Stitch preview generated</span>';
         } else {
             statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
@@ -4712,5 +4725,206 @@ async function testPanoramaStitch() {
         await showAlert('Error', 'Failed to stitch panorama: ' + error.message);
     }
 }
+
+let panoramaLiveActive = false;
+
+async function togglePanoramaLive() {
+    const camera0Id = document.getElementById('panorama-camera0-select').value;
+    const camera1Id = document.getElementById('panorama-camera1-select').value;
+    const liveBtn = document.getElementById('panorama-live-btn');
+    const stitchImage = document.getElementById('panorama-stitch-image');
+
+    if (!panoramaLiveActive) {
+        // Start live panorama
+        const streamUrl = `${API_BASE}/api/calibration/panorama/stream?camera0_id=${camera0Id}&camera1_id=${camera1Id}&blend_width=50`;
+        stitchImage.src = streamUrl;
+        liveBtn.textContent = '⏸️ Stop Live';
+        liveBtn.classList.remove('btn-success');
+        liveBtn.classList.add('btn-warning');
+        panoramaLiveActive = true;
+    } else {
+        // Stop live panorama
+        stitchImage.src = '';
+        liveBtn.textContent = '▶️ Live Panorama';
+        liveBtn.classList.remove('btn-warning');
+        liveBtn.classList.add('btn-success');
+        panoramaLiveActive = false;
+    }
+}
+
+// Live Panorama Modal Functions
+function openLivePanoramaModal() {
+    const modal = document.getElementById('live-panorama-modal');
+    modal.style.display = 'block';
+
+    // Populate camera dropdowns
+    populateLivePanoramaCameras();
+}
+
+function closeLivePanoramaModal() {
+    const modal = document.getElementById('live-panorama-modal');
+    modal.style.display = 'none';
+
+    // Stop stream if active
+    stopLivePanorama();
+}
+
+async function populateLivePanoramaCameras() {
+    try {
+        const response = await fetch(`${API_BASE}/api/cameras`);
+        const data = await response.json();
+
+        const camera0Select = document.getElementById('live-pano-camera0');
+        const camera1Select = document.getElementById('live-pano-camera1');
+
+        // Clear existing options
+        camera0Select.innerHTML = '<option value="">Select camera...</option>';
+        camera1Select.innerHTML = '<option value="">Select camera...</option>';
+
+        // The API returns {cameras: [...], platform: "...", success: true}
+        const cameras = data.cameras || [];
+
+        // Add camera options
+        cameras.forEach(camera => {
+            const option0 = document.createElement('option');
+            option0.value = camera.id;
+            option0.textContent = `Camera ${camera.id}`;
+            camera0Select.appendChild(option0);
+
+            const option1 = document.createElement('option');
+            option1.value = camera.id;
+            option1.textContent = `Camera ${camera.id}`;
+            camera1Select.appendChild(option1);
+        });
+
+        // Auto-select 0 and 1 if available
+        if (cameras.length >= 2) {
+            camera0Select.value = cameras[0].id;
+            camera1Select.value = cameras[1].id;
+        }
+
+        // Load available calibration files
+        await loadCalibrationFiles();
+    } catch (error) {
+        console.error('Failed to load cameras:', error);
+    }
+}
+
+async function loadCalibrationFiles() {
+    try {
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/files`);
+        const data = await response.json();
+
+        const fileSelect = document.getElementById('live-pano-calib-file');
+        const fileInfo = document.getElementById('live-pano-calib-info');
+
+        fileSelect.innerHTML = '<option value="">-- Select calibration file --</option>';
+
+        if (data.success && data.files && data.files.length > 0) {
+            data.files.forEach(file => {
+                const option = document.createElement('option');
+                option.value = file.filename;
+                option.dataset.path = file.path;
+                option.dataset.relativePath = file.relative_path;
+                option.textContent = file.filename;
+                fileSelect.appendChild(option);
+            });
+
+            // Auto-select expected file based on camera selection
+            const camera0Id = document.getElementById('live-pano-camera0').value;
+            const camera1Id = document.getElementById('live-pano-camera1').value;
+            if (camera0Id && camera1Id) {
+                const expectedFile = `${camera0Id}_${camera1Id}.json`;
+                const option = Array.from(fileSelect.options).find(opt => opt.value === expectedFile);
+                if (option) {
+                    fileSelect.value = expectedFile;
+                }
+            }
+
+            fileInfo.textContent = `Directory: ${data.directory} (${data.files.length} file(s) found)`;
+        } else {
+            fileSelect.innerHTML = '<option value="">No calibration files found</option>';
+            fileInfo.textContent = `Directory: ${data.directory || 'N/A'} - ${data.directory_exists ? 'exists but empty' : 'does not exist'}`;
+        }
+
+        updateCalibrationFileInfo();
+    } catch (error) {
+        console.error('Failed to load calibration files:', error);
+        const fileInfo = document.getElementById('live-pano-calib-info');
+        fileInfo.textContent = 'Error loading calibration files';
+        fileInfo.style.color = '#d9534f';
+    }
+}
+
+function updateCalibrationFilePath() {
+    // Reload calibration files when camera selection changes
+    loadCalibrationFiles();
+}
+
+function updateCalibrationFileInfo() {
+    const fileSelect = document.getElementById('live-pano-calib-file');
+    const fileInfo = document.getElementById('live-pano-calib-info');
+    const selectedOption = fileSelect.options[fileSelect.selectedIndex];
+
+    if (selectedOption && selectedOption.dataset.path) {
+        fileInfo.textContent = `Full path: ${selectedOption.dataset.path}`;
+        fileInfo.style.color = '#5cb85c';
+    } else if (fileSelect.value === '') {
+        fileInfo.textContent = '';
+    }
+}
+
+function startLivePanorama() {
+    const camera0Id = document.getElementById('live-pano-camera0').value;
+    const camera1Id = document.getElementById('live-pano-camera1').value;
+    const fileSelect = document.getElementById('live-pano-calib-file');
+    const selectedOption = fileSelect.options[fileSelect.selectedIndex];
+
+    if (!camera0Id || !camera1Id) {
+        showAlert('Error', 'Please select both cameras');
+        return;
+    }
+
+    if (!selectedOption || !selectedOption.value) {
+        showAlert('Error', 'Please select a calibration file');
+        return;
+    }
+
+    // Build stream URL - using preview frames (already optimized resolution)
+    const streamUrl = `${API_BASE}/api/calibration/panorama/stream?camera0_id=${camera0Id}&camera1_id=${camera1Id}&blend_width=50`;
+
+    console.log('Starting live panorama...');
+    console.log('Camera 0:', camera0Id);
+    console.log('Camera 1:', camera1Id);
+    console.log('Selected calibration file:', selectedOption.value);
+    console.log('Full calibration path:', selectedOption.dataset.path);
+    console.log('Stream URL:', streamUrl);
+    console.log('Stream URL:', streamUrl);
+
+    const streamImg = document.getElementById('live-pano-stream');
+    const placeholder = document.getElementById('live-pano-placeholder');
+    const startBtn = document.getElementById('live-pano-start-btn');
+    const stopBtn = document.getElementById('live-pano-stop-btn');
+
+    streamImg.src = streamUrl;
+    streamImg.style.display = 'block';
+    placeholder.style.display = 'none';
+    startBtn.style.display = 'none';
+    stopBtn.style.display = 'inline-block';
+}
+
+function stopLivePanorama() {
+    const streamImg = document.getElementById('live-pano-stream');
+    const placeholder = document.getElementById('live-pano-placeholder');
+    const startBtn = document.getElementById('live-pano-start-btn');
+    const stopBtn = document.getElementById('live-pano-stop-btn');
+
+    streamImg.src = '';
+    streamImg.style.display = 'none';
+    placeholder.style.display = 'block';
+    startBtn.style.display = 'inline-block';
+    stopBtn.style.display = 'none';
+}
+
 
 

@@ -2700,6 +2700,441 @@ def panorama_compute():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/calibration/panorama/stitch', methods=['POST'])
+def panorama_stitch():
+    """Generate a stitched panorama from current camera frames using calibration."""
+    import cv2
+    import numpy as np
+    import base64
+    
+    try:
+        data = request.json
+        camera0_id = data.get('camera0_id') or data.get('camera1_id')  # Support both naming conventions
+        camera1_id = data.get('camera1_id') or data.get('camera2_id')
+        session_id = data.get('session_id')
+        blend_width = data.get('blend_width', 50)
+        
+        # Load calibration from session if provided, otherwise use latest
+        homography = None
+        
+        if session_id and session_id in panorama_sessions:
+            session = panorama_sessions[session_id]
+            session_dir = Path(session['session_dir'])
+            
+            # Try to load panorama calibration results
+            results_file = session_dir / 'panorama_calibration_results.json'
+            if results_file.exists():
+                with open(results_file, 'r') as f:
+                    calib_data = json.load(f)
+                    if 'homography' in calib_data:
+                        homography = np.array(calib_data['homography'])
+        
+        # If no homography from session, try to load from global settings
+        if homography is None:
+            # Use absolute path from backend directory
+            import os
+            backend_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+            panorama_dir = backend_dir / 'camera' / 'settings' / 'panorama'
+            panorama_file = panorama_dir / f'{camera0_id}_{camera1_id}.json'
+            
+            # Debug logging
+            print(f"[Panorama Stitch] Attempting to load calibration file:")
+            print(f"  Backend dir: {backend_dir}")
+            print(f"  Panorama dir: {panorama_dir}")
+            print(f"  Panorama file: {panorama_file}")
+            print(f"  File exists: {panorama_file.exists()}")
+            
+            if not panorama_file.exists():
+                # Try reverse order
+                panorama_file = panorama_dir / f'{camera1_id}_{camera0_id}.json'
+            
+            error_message = None
+            if panorama_file.exists():
+                try:
+                    with open(panorama_file, 'r') as f:
+                        calib_data = json.load(f)
+                        # Handle nested calibration structure
+                        if 'calibration' in calib_data and 'homography' in calib_data['calibration']:
+                            homography = np.array(calib_data['calibration']['homography'])
+                        elif 'homography' in calib_data:
+                            homography = np.array(calib_data['homography'])
+                        else:
+                            error_message = f"Calibration file found but missing 'homography' key. Available keys: {list(calib_data.keys())}"
+                except json.JSONDecodeError as e:
+                    error_message = f"Invalid JSON in calibration file: {e}"
+                except Exception as e:
+                    error_message = f"Error loading calibration file: {e}"
+            else:
+                error_message = f"Calibration file not found at {panorama_file}"
+        
+        if homography is None:
+            # Provide specific error message
+            return jsonify({
+                'success': False,
+                'error': error_message or f'No panorama calibration found for cameras {camera0_id} and {camera1_id}',
+                'expected_file': str(panorama_file),
+                'directory': str(panorama_dir),
+                'file_exists': panorama_file.exists()
+            }), 400
+        
+        # Get frames from both cameras
+        frame0 = camera_backend.get_full_frame(camera0_id)
+        frame1 = camera_backend.get_full_frame(camera1_id)
+        
+        if frame0 is None or frame1 is None:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to get frames from cameras. Make sure both cameras are streaming.'
+            }), 400
+        
+        # Load rotation matrix for symmetric rectification (if available)
+        rotation_matrix = None
+        K_left = None
+        K_right = None
+        calibration_size = None
+        
+        try:
+            with open(panorama_file, 'r') as f:
+                calib_data_full = json.load(f)
+                if 'calibration' in calib_data_full and 'extrinsics' in calib_data_full['calibration']:
+                    extrinsics = calib_data_full['calibration']['extrinsics']
+                    if 'rotation_matrix' in extrinsics:
+                        rotation_matrix = np.array(extrinsics['rotation_matrix'])
+            
+            # Load camera intrinsics
+            cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
+            if cam0_calib_path.exists():
+                with open(cam0_calib_path, 'r') as f:
+                    cam0_data = json.load(f)
+                    if 'camera_matrix' in cam0_data:
+                        K_left = np.array(cam0_data['camera_matrix'])
+                    if 'image_size' in cam0_data:
+                        calibration_size = tuple(cam0_data['image_size'])
+            
+            cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
+            if cam1_calib_path.exists():
+                with open(cam1_calib_path, 'r') as f:
+                    cam1_data = json.load(f)
+                    if 'camera_matrix' in cam1_data:
+                        K_right = np.array(cam1_data['camera_matrix'])
+                        
+        except Exception as e:
+            print(f"Could not load calibration data: {e}")
+        
+        # Stitch the panorama using cylindrical projection
+        if rotation_matrix is not None and K_left is not None and K_right is not None:
+            from backend.panorama_utils import stitch_panorama_cylindrical
+            stitched = stitch_panorama_cylindrical(
+                frame0, frame1,
+                rotation_matrix=rotation_matrix,
+                K_left=K_left,
+                K_right=K_right,
+                blend_width=blend_width
+            )
+        else:
+            from backend.panorama_utils import stitch_panorama
+            stitched = stitch_panorama(frame0, frame1, homography, blend_width)
+        
+        # Encode as JPEG for display
+        _, buffer = cv2.imencode('.jpg', stitched, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        
+        return jsonify({
+            'success': True,
+            'image': f'data:image/jpeg;base64,{img_base64}',
+            'width': stitched.shape[1],
+            'height': stitched.shape[0]
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/files')
+def list_panorama_calibration_files():
+    """List available panorama calibration files."""
+    import os
+    backend_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    panorama_dir = backend_dir / 'camera' / 'settings' / 'panorama'
+    
+    files = []
+    if panorama_dir.exists():
+        for file in panorama_dir.glob('*.json'):
+            files.append({
+                'filename': file.name,
+                'path': str(file),
+                'relative_path': f'backend/camera/settings/panorama/{file.name}'
+            })
+    
+    return jsonify({
+        'success': True,
+        'files': files,
+        'directory': str(panorama_dir),
+        'directory_exists': panorama_dir.exists()
+    })
+
+
+@app.route('/api/calibration/panorama/stream')
+def panorama_stream():
+    """Stream live stitched panorama."""
+    import cv2
+    import numpy as np
+    
+    camera0_id = request.args.get('camera0_id') or request.args.get('camera1_id', '0')
+    camera1_id = request.args.get('camera1_id') or request.args.get('camera2_id', '1')
+    blend_width = int(request.args.get('blend_width', 50))
+    scale = float(request.args.get('scale', 1.0))  # No scaling by default for preview frames
+    
+    def generate():
+        # Load homography
+        homography = None
+        # Use absolute path from backend directory
+        import os
+        backend_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        panorama_dir = backend_dir / 'camera' / 'settings' / 'panorama'
+        panorama_file = panorama_dir / f'{camera0_id}_{camera1_id}.json'
+        
+        # Debug logging
+        print(f"[Panorama Stream] Attempting to load calibration file:")
+        print(f"  Backend dir: {backend_dir}")
+        print(f"  Panorama dir: {panorama_dir}")
+        print(f"  Panorama file: {panorama_file}")
+        print(f"  File exists: {panorama_file.exists()}")
+        
+        if not panorama_file.exists():
+            # Try reverse order
+            panorama_file = panorama_dir / f'{camera1_id}_{camera0_id}.json'
+            print(f"  Trying reverse order: {panorama_file}")
+            print(f"  File exists: {panorama_file.exists()}")
+        
+        error_message = None
+        if panorama_file.exists():
+            try:
+                with open(panorama_file, 'r') as f:
+                    calib_data = json.load(f)
+                    # Handle nested calibration structure
+                    if 'calibration' in calib_data and 'homography' in calib_data['calibration']:
+                        homography = np.array(calib_data['calibration']['homography'])
+                        print(f"  Loaded homography from calibration.homography")
+                    elif 'homography' in calib_data:
+                        homography = np.array(calib_data['homography'])
+                        print(f"  Loaded homography from root level")
+                    else:
+                        error_message = f"File found but missing 'homography' key"
+                        print(f"  ERROR: {error_message}")
+                        print(f"  Available keys: {list(calib_data.keys())}")
+            except json.JSONDecodeError as e:
+                error_message = f"Invalid JSON in calibration file: {e}"
+                print(f"  ERROR: {error_message}")
+            except Exception as e:
+                error_message = f"Error loading calibration: {e}"
+                print(f"  ERROR: {error_message}")
+        else:
+            error_message = f"Calibration file not found"
+            print(f"  ERROR: {error_message}")
+        
+        if homography is None:
+            # Return error frame with specific error message
+            error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            if error_message:
+                cv2.putText(error_frame, 'Panorama Calibration Error', (20, 180),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                # Split long error messages
+                words = error_message.split()
+                line = ""
+                y = 220
+                for word in words:
+                    test_line = line + word + " "
+                    if len(test_line) > 50:
+                        cv2.putText(error_frame, line.strip(), (20, y),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        line = word + " "
+                        y += 30
+                    else:
+                        line = test_line
+                if line:
+                    cv2.putText(error_frame, line.strip(), (20, y),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    y += 30
+            else:
+                cv2.putText(error_frame, f'No calibration for {camera0_id}_{camera1_id}', (20, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            cv2.putText(error_frame, f'File: {panorama_file.name}', (20, y + 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+            cv2.putText(error_frame, f'Path: {panorama_dir}', (20, y + 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+            _, buffer = cv2.imencode('.jpg', error_frame)
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            return
+        
+        # Load rotation matrix for symmetric rectification (if available)
+        rotation_matrix = None
+        K_left = None
+        K_right = None
+        calibration_size = None
+        
+        try:
+            with open(panorama_file, 'r') as f:
+                calib_data = json.load(f)
+                if 'calibration' in calib_data and 'extrinsics' in calib_data['calibration']:
+                    extrinsics = calib_data['calibration']['extrinsics']
+                    if 'rotation_matrix' in extrinsics:
+                        rotation_matrix = np.array(extrinsics['rotation_matrix'])
+                        print(f"  Loaded rotation matrix for symmetric rectification")
+            
+            # Load camera intrinsics from calibration sessions
+            # Camera 0 intrinsics
+            cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
+            if cam0_calib_path.exists():
+                with open(cam0_calib_path, 'r') as f:
+                    cam0_data = json.load(f)
+                    if 'camera_matrix' in cam0_data:
+                        K_left = np.array(cam0_data['camera_matrix'])
+                        print(f"  Loaded camera 0 intrinsics")
+                    if 'image_size' in cam0_data:
+                        calibration_size = tuple(cam0_data['image_size'])  # (width, height)
+                        print(f"  Calibration resolution: {calibration_size}")
+            
+            # Camera 1 intrinsics
+            cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
+            if cam1_calib_path.exists():
+                with open(cam1_calib_path, 'r') as f:
+                    cam1_data = json.load(f)
+                    if 'camera_matrix' in cam1_data:
+                        K_right = np.array(cam1_data['camera_matrix'])
+                        print(f"  Loaded camera 1 intrinsics")
+                        
+        except Exception as e:
+            print(f"  Could not load calibration data: {e}")
+        
+        # Import stitching function - using cylindrical projection
+        if rotation_matrix is not None and K_left is not None and K_right is not None:
+            from backend.panorama_utils import stitch_panorama_cylindrical
+            stitch_func = lambda img0, img1: stitch_panorama_cylindrical(
+                img0, img1,
+                rotation_matrix=rotation_matrix,
+                K_left=K_left,
+                K_right=K_right,
+                blend_width=blend_width
+            )
+            print(f"  Using cylindrical projection stitching with camera intrinsics")
+        else:
+            from backend.panorama_utils import stitch_panorama
+            stitch_func = lambda img0, img1: stitch_panorama(img0, img1, homography, blend_width)
+            print(f"  Using standard homography stitching (fallback)")
+        
+        # Check if cameras are streaming, start them if not
+        cameras_started = []
+        
+        if not camera_backend.is_streaming(camera0_id):
+            print(f"  Camera {camera0_id} not streaming, starting it...")
+            success = camera_backend.start_stream(camera0_id)
+            if success:
+                cameras_started.append(camera0_id)
+                print(f"  Camera {camera0_id} started successfully")
+                time.sleep(0.5)  # Give camera time to initialize
+            else:
+                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(error_frame, f'Failed to start camera {camera0_id}', (20, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                _, buffer = cv2.imencode('.jpg', error_frame)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                return
+            
+        if not camera_backend.is_streaming(camera1_id):
+            print(f"  Camera {camera1_id} not streaming, starting it...")
+            success = camera_backend.start_stream(camera1_id)
+            if success:
+                cameras_started.append(camera1_id)
+                print(f"  Camera {camera1_id} started successfully")
+                time.sleep(0.5)  # Give camera time to initialize
+            else:
+                error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(error_frame, f'Failed to start camera {camera1_id}', (20, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                _, buffer = cv2.imencode('.jpg', error_frame)
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                return
+        
+        print(f"  Starting panorama stream for cameras {camera0_id} and {camera1_id}")
+        frame_count = 0
+        last_time = time.time()
+        
+        try:
+            while True:
+                try:
+                    # Get preview frames (already JPEG-encoded, lower resolution, more efficient)
+                    frame0_jpeg = camera_backend.get_preview_frame(camera0_id)
+                    frame1_jpeg = camera_backend.get_preview_frame(camera1_id)
+                    
+                    if frame0_jpeg is None or frame1_jpeg is None:
+                        if frame_count < 3:
+                            print(f"  Waiting for frames... (cam0: {frame0_jpeg is not None}, cam1: {frame1_jpeg is not None})")
+                        time.sleep(0.033)  # ~30 FPS
+                        continue
+                    
+                    # Decode JPEG to numpy arrays
+                    frame0 = cv2.imdecode(np.frombuffer(frame0_jpeg, np.uint8), cv2.IMREAD_COLOR)
+                    frame1 = cv2.imdecode(np.frombuffer(frame1_jpeg, np.uint8), cv2.IMREAD_COLOR)
+                    
+                    # Debug logging for first few frames
+                    if frame_count < 3:
+                        print(f"  Frame {frame_count}: cam0={frame0.shape if frame0 is not None else None}, cam1={frame1.shape if frame1 is not None else None}")
+                    
+                    if frame0 is None or frame1 is None:
+                        if frame_count < 3:
+                            print(f"  Decode failed - skipping frame")
+                        time.sleep(0.033)
+                        continue
+                    
+                    # Stitch using appropriate method
+                    stitched = stitch_func(frame0, frame1)
+                    
+                    if frame_count < 3:
+                        print(f"  Stitched shape: {stitched.shape}, min: {stitched.min()}, max: {stitched.max()}")
+                    
+                    # Scale down for streaming if requested
+                    if scale != 1.0:
+                        new_width = int(stitched.shape[1] * scale)
+                        new_height = int(stitched.shape[0] * scale)
+                        stitched = cv2.resize(stitched, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                        if frame_count == 3:
+                            print(f"  Scaled to: {stitched.shape} (scale={scale})")
+                    
+                    # Encode to JPEG with good quality
+                    _, buffer = cv2.imencode('.jpg', stitched, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                    
+                    # FPS logging (every 30 frames)
+                    frame_count += 1
+                    if frame_count % 30 == 0:
+                        current_time = time.time()
+                        fps = 30.0 / (current_time - last_time)
+                        print(f"  Panorama stream FPS: {fps:.1f}")
+                        last_time = current_time
+                    
+                except Exception as e:
+                    print(f"Panorama stream error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
+        finally:
+            # Clean up: stop cameras we started
+            for cam_id in cameras_started:
+                print(f"  Stopping camera {cam_id} (auto-started)")
+                camera_backend.stop_stream(cam_id)
+    
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
 @app.route('/api/calibration/list', methods=['GET'])
 def list_calibrations():
     """List all available calibration files."""
@@ -3006,101 +3441,6 @@ def panorama_load():
         return jsonify({
             'success': True,
             'calibration': calibration
-        })
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/calibration/panorama/stitch', methods=['POST'])
-def panorama_stitch():
-    """
-    Apply panorama calibration to stitch current camera feeds.
-    Uses hardware-synchronized frames for accurate stitching.
-    """
-    try:
-        data = request.json
-        camera1_id = data.get('camera0_id')
-        camera2_id = data.get('camera1_id')
-        blend_width = data.get('blend_width', 50)
-        
-        if not camera1_id or not camera2_id:
-            return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
-        
-        # Load panorama calibration
-        calibration = load_panorama_calibration(camera1_id, camera2_id)
-        
-        if calibration is None:
-            return jsonify({'success': False, 'error': 'No calibration found'}), 404
-        
-        # Get homography matrix
-        import numpy as np
-        H = np.array(calibration['calibration']['homography'])
-        
-        # Get or create synchronized pair
-        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
-        if sync_pair is None:
-            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
-            sync_pair.start()
-        
-        # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
-        sync_result = sync_pair.get_synchronized_frames(max_time_diff=0.016)
-        
-        if sync_result is None:
-            return jsonify({'success': False, 'error': 'Failed to get synchronized frames'}), 500
-        
-        frame1, frame2, avg_timestamp = sync_result
-        
-        # Apply individual calibrations if available
-        cam1_calib = None
-        cam2_calib = None
-        
-        calibration_plugin = feature_manager.get_plugin('Camera Calibration')
-        if calibration_plugin:
-            try:
-                # Try to load calibration for each camera
-                cam1_result = calibration_plugin.load_calibration(f"camera_{camera1_id}")
-                if cam1_result.get('success'):
-                    cam1_calib = {
-                        'camera_matrix': np.array(cam1_result['camera_matrix']),
-                        'dist_coeffs': np.array(cam1_result['distortion_coeffs'])
-                    }
-                
-                cam2_result = calibration_plugin.load_calibration(f"camera_{camera2_id}")
-                if cam2_result.get('success'):
-                    cam2_calib = {
-                        'camera_matrix': np.array(cam2_result['camera_matrix']),
-                        'dist_coeffs': np.array(cam2_result['distortion_coeffs'])
-                    }
-            except Exception as e:
-                print(f"Warning: Could not load camera calibrations: {e}")
-        
-        if cam1_calib:
-            import cv2
-            frame1 = cv2.undistort(frame1, cam1_calib['camera_matrix'], cam1_calib['dist_coeffs'])
-        
-        if cam2_calib:
-            import cv2
-            frame2 = cv2.undistort(frame2, cam2_calib['camera_matrix'], cam2_calib['dist_coeffs'])
-        
-        # Stitch images
-        stitched = stitch_images(frame1, frame2, H, blend_width)
-        
-        # Encode as JPEG
-        import cv2
-        _, buffer = cv2.imencode('.jpg', stitched, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        
-        # Return as base64
-        import base64
-        image_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        return jsonify({
-            'success': True,
-            'image': f'data:image/jpeg;base64,{image_base64}',
-            'width': stitched.shape[1],
-            'height': stitched.shape[0]
         })
         
     except Exception as e:
