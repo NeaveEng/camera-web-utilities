@@ -2466,26 +2466,30 @@ def panorama_save_settings():
                     with open(session_info_path, 'r') as f:
                         session_info = json.load(f)
                     
-                    # Copy calibration files if available
+                    # Copy calibration files if available (only if not already copied)
                     calib_copies = {}
                     if cam0_calib and cam0_calib_name:
                         cam0_calib_copy_path = Path(session['session_dir']) / f"camera0_calibration_{cam0_calib_name.replace('/', '_')}.json"
-                        with open(cam0_calib_copy_path, 'w') as f:
-                            json.dump({
-                                'camera_matrix': cam0_calib['camera_matrix'].tolist(),
-                                'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
-                                'source': cam0_calib_name
-                            }, f, indent=2)
+                        # Only create if it doesn't already exist
+                        if not cam0_calib_copy_path.exists():
+                            with open(cam0_calib_copy_path, 'w') as f:
+                                json.dump({
+                                    'camera_matrix': cam0_calib['camera_matrix'].tolist(),
+                                    'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
+                                    'source': cam0_calib_name
+                                }, f, indent=2)
                         calib_copies['camera0_calibration_file'] = str(cam0_calib_copy_path.name)
                     
                     if cam1_calib and cam1_calib_name:
                         cam1_calib_copy_path = Path(session['session_dir']) / f"camera1_calibration_{cam1_calib_name.replace('/', '_')}.json"
-                        with open(cam1_calib_copy_path, 'w') as f:
-                            json.dump({
-                                'camera_matrix': cam1_calib['camera_matrix'].tolist(),
-                                'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
-                                'source': cam1_calib_name
-                            }, f, indent=2)
+                        # Only create if it doesn't already exist
+                        if not cam1_calib_copy_path.exists():
+                            with open(cam1_calib_copy_path, 'w') as f:
+                                json.dump({
+                                    'camera_matrix': cam1_calib['camera_matrix'].tolist(),
+                                    'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
+                                    'source': cam1_calib_name
+                                }, f, indent=2)
                         calib_copies['camera1_calibration_file'] = str(cam1_calib_copy_path.name)
                     
                     # Update metadata
@@ -2636,7 +2640,9 @@ def panorama_compute():
             save_path = save_panorama_calibration(
                 result,
                 session['camera0_id'],
-                session['camera1_id']
+                session['camera1_id'],
+                camera1_calib=cam0_calib,
+                camera2_calib=cam1_calib
             )
             result['save_path'] = save_path
             
@@ -2656,26 +2662,30 @@ def panorama_compute():
                         with open(session_info_path, 'r') as f:
                             session_info = json.load(f)
                         
-                        # Copy individual calibration files to session directory for archival
+                        # Copy individual calibration files to session directory for archival (only if not already copied)
                         calib_copies = {}
                         if cam0_calib and cam0_calib_name:
                             cam0_calib_copy_path = Path(session['session_dir']) / f"camera0_calibration_{cam0_calib_name.replace('/', '_')}.json"
-                            with open(cam0_calib_copy_path, 'w') as f:
-                                json.dump({
-                                    'camera_matrix': cam0_calib['camera_matrix'].tolist(),
-                                    'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
-                                    'source': cam0_calib_name
-                                }, f, indent=2)
+                            # Only create if it doesn't already exist
+                            if not cam0_calib_copy_path.exists():
+                                with open(cam0_calib_copy_path, 'w') as f:
+                                    json.dump({
+                                        'camera_matrix': cam0_calib['camera_matrix'].tolist(),
+                                        'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
+                                        'source': cam0_calib_name
+                                    }, f, indent=2)
                             calib_copies['camera0_calibration_file'] = str(cam0_calib_copy_path.name)
                         
                         if cam1_calib and cam1_calib_name:
                             cam1_calib_copy_path = Path(session['session_dir']) / f"camera1_calibration_{cam1_calib_name.replace('/', '_')}.json"
-                            with open(cam1_calib_copy_path, 'w') as f:
-                                json.dump({
-                                    'camera_matrix': cam1_calib['camera_matrix'].tolist(),
-                                    'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
-                                    'source': cam1_calib_name
-                                }, f, indent=2)
+                            # Only create if it doesn't already exist
+                            if not cam1_calib_copy_path.exists():
+                                with open(cam1_calib_copy_path, 'w') as f:
+                                    json.dump({
+                                        'camera_matrix': cam1_calib['camera_matrix'].tolist(),
+                                        'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
+                                        'source': cam1_calib_name
+                                    }, f, indent=2)
                             calib_copies['camera1_calibration_file'] = str(cam1_calib_copy_path.name)
                         
                         # Add calibration metadata
@@ -2787,36 +2797,51 @@ def panorama_stitch():
                 'error': 'Failed to get frames from cameras. Make sure both cameras are streaming.'
             }), 400
         
-        # Load rotation matrix for symmetric rectification (if available)
+        # Load calibration data (intrinsics + extrinsics)
         rotation_matrix = None
         K_left = None
         K_right = None
-        calibration_size = None
         
         try:
             with open(panorama_file, 'r') as f:
                 calib_data_full = json.load(f)
-                if 'calibration' in calib_data_full and 'extrinsics' in calib_data_full['calibration']:
-                    extrinsics = calib_data_full['calibration']['extrinsics']
-                    if 'rotation_matrix' in extrinsics:
-                        rotation_matrix = np.array(extrinsics['rotation_matrix'])
-            
-            # Load camera intrinsics
-            cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
-            if cam0_calib_path.exists():
-                with open(cam0_calib_path, 'r') as f:
-                    cam0_data = json.load(f)
-                    if 'camera_matrix' in cam0_data:
-                        K_left = np.array(cam0_data['camera_matrix'])
-                    if 'image_size' in cam0_data:
-                        calibration_size = tuple(cam0_data['image_size'])
-            
-            cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
-            if cam1_calib_path.exists():
-                with open(cam1_calib_path, 'r') as f:
-                    cam1_data = json.load(f)
-                    if 'camera_matrix' in cam1_data:
-                        K_right = np.array(cam1_data['camera_matrix'])
+                
+                # Check if it's the new unified format (version 2.0)
+                if calib_data_full.get('version') == '2.0' and calib_data_full.get('type') == 'panorama_calibration':
+                    # New format with everything in one file
+                    if 'extrinsics' in calib_data_full and 'rotation_matrix' in calib_data_full['extrinsics']:
+                        rotation_matrix = np.array(calib_data_full['extrinsics']['rotation_matrix'])
+                    
+                    if 'intrinsics' in calib_data_full:
+                        if 'left' in calib_data_full['intrinsics'] and 'camera_matrix' in calib_data_full['intrinsics']['left']:
+                            K_left = np.array(calib_data_full['intrinsics']['left']['camera_matrix'])
+                        if 'right' in calib_data_full['intrinsics'] and 'camera_matrix' in calib_data_full['intrinsics']['right']:
+                            K_right = np.array(calib_data_full['intrinsics']['right']['camera_matrix'])
+                    
+                    print(f"Loaded unified panorama calibration (v2.0)")
+                else:
+                    # Old format - try to load from nested structure
+                    if 'calibration' in calib_data_full and 'extrinsics' in calib_data_full['calibration']:
+                        extrinsics = calib_data_full['calibration']['extrinsics']
+                        if 'rotation_matrix' in extrinsics:
+                            rotation_matrix = np.array(extrinsics['rotation_matrix'])
+                    
+                    # Try to load intrinsics from separate session files (fallback)
+                    cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
+                    if cam0_calib_path.exists():
+                        with open(cam0_calib_path, 'r') as f:
+                            cam0_data = json.load(f)
+                            if 'camera_matrix' in cam0_data:
+                                K_left = np.array(cam0_data['camera_matrix'])
+                    
+                    cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
+                    if cam1_calib_path.exists():
+                        with open(cam1_calib_path, 'r') as f:
+                            cam1_data = json.load(f)
+                            if 'camera_matrix' in cam1_data:
+                                K_right = np.array(cam1_data['camera_matrix'])
+                    
+                    print(f"Loaded legacy calibration format")
                         
         except Exception as e:
             print(f"Could not load calibration data: {e}")
@@ -2971,42 +2996,59 @@ def panorama_stream():
                    b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
             return
         
-        # Load rotation matrix for symmetric rectification (if available)
+        # Load calibration data (intrinsics + extrinsics)
         rotation_matrix = None
         K_left = None
         K_right = None
-        calibration_size = None
         
         try:
             with open(panorama_file, 'r') as f:
                 calib_data = json.load(f)
-                if 'calibration' in calib_data and 'extrinsics' in calib_data['calibration']:
-                    extrinsics = calib_data['calibration']['extrinsics']
-                    if 'rotation_matrix' in extrinsics:
-                        rotation_matrix = np.array(extrinsics['rotation_matrix'])
-                        print(f"  Loaded rotation matrix for symmetric rectification")
+                
+                # Check if it's the new unified format (version 2.0)
+                if calib_data.get('version') == '2.0' and calib_data.get('type') == 'panorama_calibration':
+                    # New format with everything in one file
+                    print(f"  Loading unified panorama calibration (v2.0)")
+                    
+                    if 'extrinsics' in calib_data and 'rotation_matrix' in calib_data['extrinsics']:
+                        rotation_matrix = np.array(calib_data['extrinsics']['rotation_matrix'])
+                        print(f"  Loaded rotation matrix from unified file")
+                    
+                    if 'intrinsics' in calib_data:
+                        if 'left' in calib_data['intrinsics'] and 'camera_matrix' in calib_data['intrinsics']['left']:
+                            K_left = np.array(calib_data['intrinsics']['left']['camera_matrix'])
+                            print(f"  Loaded left camera intrinsics from unified file")
+                        if 'right' in calib_data['intrinsics'] and 'camera_matrix' in calib_data['intrinsics']['right']:
+                            K_right = np.array(calib_data['intrinsics']['right']['camera_matrix'])
+                            print(f"  Loaded right camera intrinsics from unified file")
+                else:
+                    # Old format - try to load from nested structure and separate files
+                    print(f"  Loading legacy calibration format")
+                    
+                    if 'calibration' in calib_data and 'extrinsics' in calib_data['calibration']:
+                        extrinsics = calib_data['calibration']['extrinsics']
+                        if 'rotation_matrix' in extrinsics:
+                            rotation_matrix = np.array(extrinsics['rotation_matrix'])
+                            print(f"  Loaded rotation matrix")
             
-            # Load camera intrinsics from calibration sessions
-            # Camera 0 intrinsics
-            cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
-            if cam0_calib_path.exists():
-                with open(cam0_calib_path, 'r') as f:
-                    cam0_data = json.load(f)
-                    if 'camera_matrix' in cam0_data:
-                        K_left = np.array(cam0_data['camera_matrix'])
-                        print(f"  Loaded camera 0 intrinsics")
-                    if 'image_size' in cam0_data:
-                        calibration_size = tuple(cam0_data['image_size'])  # (width, height)
-                        print(f"  Calibration resolution: {calibration_size}")
+            # Try to load intrinsics from separate session files (fallback for old format)
+            if K_left is None:
+                cam0_calib_path = Path('data/calibration/session_20251126_152723/0/calibration_results.json')
+                if cam0_calib_path.exists():
+                    with open(cam0_calib_path, 'r') as f:
+                        cam0_data = json.load(f)
+                        if 'camera_matrix' in cam0_data:
+                            K_left = np.array(cam0_data['camera_matrix'])
+                            print(f"  Loaded camera 0 intrinsics from session file")
             
-            # Camera 1 intrinsics
-            cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
-            if cam1_calib_path.exists():
-                with open(cam1_calib_path, 'r') as f:
-                    cam1_data = json.load(f)
-                    if 'camera_matrix' in cam1_data:
-                        K_right = np.array(cam1_data['camera_matrix'])
-                        print(f"  Loaded camera 1 intrinsics")
+            if K_right is None:
+                cam1_calib_path = Path('data/calibration/session_20251202_155515/1/calibration_results.json')
+                if cam1_calib_path.exists():
+                    with open(cam1_calib_path, 'r') as f:
+                        cam1_data = json.load(f)
+                        if 'camera_matrix' in cam1_data:
+                            K_right = np.array(cam1_data['camera_matrix'])
+                            print(f"  Loaded camera 1 intrinsics from session file")
                         
         except Exception as e:
             print(f"  Could not load calibration data: {e}")

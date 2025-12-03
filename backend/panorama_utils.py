@@ -362,6 +362,132 @@ def save_stereo_calibration(stereo_calib: dict, camera1_id: str, camera2_id: str
         json.dump(save_data, f, indent=2)
     
     logger.info(f"Saved stereo calibration to {filepath}")
+    
+    # Also save a panorama-ready calibration file with intrinsics + extrinsics
+    save_panorama_calibration(stereo_calib, camera1_id, camera2_id)
+    
+    return str(filepath)
+
+
+def save_panorama_calibration(panorama_calib: dict, camera1_id: str, camera2_id: str,
+                              camera1_calib: Optional[dict] = None,
+                              camera2_calib: Optional[dict] = None,
+                              output_dir: str = "backend/camera/settings/panorama") -> str:
+    """
+    Save panorama calibration file with complete intrinsics and extrinsics.
+    
+    This creates a comprehensive calibration file that includes:
+    - Camera intrinsic matrices (K) and distortion coefficients
+    - Rotation matrix and translation vector (extrinsics)
+    - Optimal homography for stitching
+    - Image size and metadata
+    
+    Args:
+        panorama_calib: Panorama calibration result dictionary (from calibrate_panorama_multiple or stereoCalibrate)
+        camera1_id: ID of first camera (left)
+        camera2_id: ID of second camera (right)
+        camera1_calib: Optional camera1 intrinsics dict with 'camera_matrix' and 'distortion_coeffs'
+        camera2_calib: Optional camera2 intrinsics dict with 'camera_matrix' and 'distortion_coeffs'
+        output_dir: Directory to save panorama calibration
+    
+    Returns:
+        Path to saved file
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Create filename
+    filename = f"{camera1_id}_{camera2_id}.json"
+    filepath = output_path / filename
+    
+    # Handle different calibration result formats
+    # Check if this is stereo calibration format (has camera_matrices) or panorama format (doesn't)
+    has_intrinsics = 'camera_matrices' in panorama_calib and 'distortion_coeffs' in panorama_calib
+    
+    # Extract intrinsics
+    if has_intrinsics:
+        # Stereo calibration format
+        left_K = panorama_calib['camera_matrices']['camera1']
+        left_dist = panorama_calib['distortion_coeffs']['camera1']
+        right_K = panorama_calib['camera_matrices']['camera2']
+        right_dist = panorama_calib['distortion_coeffs']['camera2']
+    elif camera1_calib and camera2_calib:
+        # Use provided calibrations
+        left_K = camera1_calib['camera_matrix'].tolist() if hasattr(camera1_calib['camera_matrix'], 'tolist') else camera1_calib['camera_matrix']
+        left_dist = camera1_calib['distortion_coeffs'].tolist() if hasattr(camera1_calib['distortion_coeffs'], 'tolist') else camera1_calib['distortion_coeffs']
+        right_K = camera2_calib['camera_matrix'].tolist() if hasattr(camera2_calib['camera_matrix'], 'tolist') else camera2_calib['camera_matrix']
+        right_dist = camera2_calib['distortion_coeffs'].tolist() if hasattr(camera2_calib['distortion_coeffs'], 'tolist') else camera2_calib['distortion_coeffs']
+    else:
+        # No intrinsics available
+        left_K = None
+        left_dist = None
+        right_K = None
+        right_dist = None
+    
+    # Extract extrinsics
+    if 'extrinsics' in panorama_calib:
+        extrinsics_data = panorama_calib['extrinsics']
+    else:
+        # Legacy format with rotation_matrix and translation_vector at top level
+        extrinsics_data = {
+            'rotation_matrix': panorama_calib.get('rotation_matrix'),
+            'translation_vector': panorama_calib.get('translation_vector'),
+            'essential_matrix': panorama_calib.get('essential_matrix'),
+            'fundamental_matrix': panorama_calib.get('fundamental_matrix')
+        }
+    
+    # Build panorama data structure
+    panorama_data = {
+        'version': '2.0',
+        'type': 'panorama_calibration',
+        'description': 'Complete calibration for panoramic stitching with intrinsics and extrinsics',
+        'timestamp': panorama_calib.get('timestamp', None),
+        
+        # Camera IDs
+        'camera_left_id': camera1_id,
+        'camera_right_id': camera2_id,
+        
+        # Image properties
+        'image_size': panorama_calib.get('image_size', [1920, 1080]),  # [width, height]
+        
+        # Homography for stitching
+        'homography': panorama_calib.get('homography', panorama_calib.get('optimal_homography', None)),
+        
+        # Extrinsics (transformation from left to right camera)
+        'extrinsics': extrinsics_data,
+        
+        # Quality metrics
+        'calibration_quality': {
+            'reprojection_error': panorama_calib.get('reprojection_error', 0.0),
+            'pairs_used': panorama_calib.get('pairs_used', panorama_calib.get('successful_captures', 0)),
+            'pairs_total': panorama_calib.get('pairs_total', panorama_calib.get('total_captures', 0)),
+            'total_matches': panorama_calib.get('total_matches', 0),
+            'metrics': panorama_calib.get('metrics', {})
+        },
+        
+        # Board configuration used
+        'board_config': panorama_calib.get('board_config', {})
+    }
+    
+    # Add intrinsics if available
+    if left_K is not None and right_K is not None:
+        panorama_data['intrinsics'] = {
+            'left': {
+                'camera_matrix': left_K,
+                'distortion_coeffs': left_dist,
+                'description': 'Left camera intrinsic parameters'
+            },
+            'right': {
+                'camera_matrix': right_K,
+                'distortion_coeffs': right_dist,
+                'description': 'Right camera intrinsic parameters'
+            }
+        }
+    
+    with open(filepath, 'w') as f:
+        json.dump(panorama_data, f, indent=2)
+    
+    logger.info(f"Saved panorama calibration to {filepath}")
     return str(filepath)
 
 
