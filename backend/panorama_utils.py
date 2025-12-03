@@ -401,7 +401,8 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
                                 board_config: dict,
                                 camera1_calibration: Optional[dict] = None,
                                 camera2_calibration: Optional[dict] = None,
-                                stereo_flags: Optional[int] = None) -> dict:
+                                stereo_flags: Optional[int] = None,
+                                calibration_method: str = 'extrinsics_only') -> dict:
     """
     Calibrate panorama alignment using multiple image pairs for robustness.
     
@@ -411,6 +412,7 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
         camera1_calibration: Optional individual calibration for camera 1
         camera2_calibration: Optional individual calibration for camera 2
         stereo_flags: Optional OpenCV stereo calibration flags (e.g., cv2.CALIB_FIX_INTRINSIC)
+        calibration_method: Either 'extrinsics_only' (PnP-based) or 'full_stereo' (stereoCalibrate)
     
     Returns:
         Dictionary with calibration results including averaged homography
@@ -502,15 +504,15 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
         'capture_results': capture_results
     }
     
-    # If stereo flags provided and both cameras have calibration, also compute stereo parameters
-    # This provides R, T matrices which can be useful for understanding camera geometry
-    if stereo_flags is not None and camera1_calibration is not None and camera2_calibration is not None:
+    # If calibrations provided, compute extrinsics (R, T) using 3D board points
+    # This gives the relative pose between cameras with correct metric scale
+    if camera1_calibration is not None and camera2_calibration is not None:
         try:
-            # Prepare object points and image points for stereo calibration
-            # Use the same detected corners from all successful captures
-            object_points_list = []
-            image_points1_list = []
-            image_points2_list = []
+            # Extract calibration matrices
+            camera_matrix1 = np.array(camera1_calibration['camera_matrix'])
+            dist_coeffs1 = np.array(camera1_calibration['distortion_coeffs'])
+            camera_matrix2 = np.array(camera2_calibration['camera_matrix'])
+            dist_coeffs2 = np.array(camera2_calibration['distortion_coeffs'])
             
             # Get board parameters
             squares_x = board_config.get('squares_x', board_config.get('width'))
@@ -519,7 +521,7 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
             marker_length = board_config['marker_length']
             dictionary_name = board_config.get('dictionary', 'DICT_6X6_100')
             
-            # Create ChArUco board for object point generation
+            # Create ChArUco board to get 3D object points
             aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
             charuco_board = cv2.aruco.CharucoBoard(
                 (squares_x, squares_y),
@@ -528,91 +530,207 @@ def calibrate_panorama_multiple(image_pairs: List[Tuple[np.ndarray, np.ndarray]]
                 aruco_dict
             )
             
-            # Re-process each successful image pair to get corner IDs and object points
-            for idx, (image1, image2) in enumerate(image_pairs):
-                if not capture_results[idx].get('success', False):
-                    continue
-                
-                # Undistort images
-                camera_matrix1 = np.array(camera1_calibration['camera_matrix'])
-                dist_coeffs1 = np.array(camera1_calibration['distortion_coeffs'])
-                image1_undist = cv2.undistort(image1, camera_matrix1, dist_coeffs1)
-                
-                camera_matrix2 = np.array(camera2_calibration['camera_matrix'])
-                dist_coeffs2 = np.array(camera2_calibration['distortion_coeffs'])
-                image2_undist = cv2.undistort(image2, camera_matrix2, dist_coeffs2)
-                
-                # Detect corners with IDs
-                detection1 = detect_charuco_for_panorama(image1_undist, board_config)
-                detection2 = detect_charuco_for_panorama(image2_undist, board_config)
-                
-                if detection1 is None or detection2 is None:
-                    continue
-                
-                # Find common corner IDs
-                ids1 = detection1['ids'].flatten()
-                ids2 = detection2['ids'].flatten()
-                common_ids = np.intersect1d(ids1, ids2)
-                
-                if len(common_ids) < 4:
-                    continue
-                
-                # Extract matching corners
-                corners1 = []
-                corners2 = []
-                obj_pts = []
-                
-                for corner_id in common_ids:
-                    idx1 = np.where(ids1 == corner_id)[0][0]
-                    idx2 = np.where(ids2 == corner_id)[0][0]
-                    corners1.append(detection1['corners'][idx1])
-                    corners2.append(detection2['corners'][idx2])
-                    
-                    # Get 3D object point for this corner ID
-                    obj_pts.append(charuco_board.getChessboardCorners()[corner_id])
-                
-                object_points_list.append(np.array(obj_pts, dtype=np.float32))
-                image_points1_list.append(np.array(corners1, dtype=np.float32))
-                image_points2_list.append(np.array(corners2, dtype=np.float32))
+            # Get 3D positions of all ChArUco corners on the board (in mm)
+            board_3d_points = charuco_board.getChessboardCorners()
             
-            if len(object_points_list) >= 3:
-                # Get image size from first image
-                image_size = (image_pairs[0][0].shape[1], image_pairs[0][0].shape[0])
+            if calibration_method == 'extrinsics_only':
+                # Method 1: Extrinsics-only using PnP (recommended for divergent cameras)
+                # Collect board poses from all captures
+                R_list_cam1 = []
+                T_list_cam1 = []
+                R_list_cam2 = []
+                T_list_cam2 = []
                 
-                # Run stereo calibration
-                retval, cam_mat1, dist1, cam_mat2, dist2, R, T, E, F = cv2.stereoCalibrate(
-                    object_points_list,
-                    image_points1_list,
-                    image_points2_list,
-                    camera_matrix1,
-                    dist_coeffs1,
-                    camera_matrix2,
-                    dist_coeffs2,
-                    image_size,
-                    flags=stereo_flags
-                )
+                for idx, (image1, image2) in enumerate(image_pairs):
+                    if not capture_results[idx].get('success', False):
+                        continue
+                    
+                    # Detect ChArUco corners in both images
+                    detection1 = detect_charuco_for_panorama(image1, board_config)
+                    detection2 = detect_charuco_for_panorama(image2, board_config)
+                    
+                    if detection1 is None or detection2 is None:
+                        continue
+                    
+                    # For camera 1: Get board pose using solvePnP
+                    if len(detection1['ids']) >= 4:
+                        ids1 = detection1['ids'].flatten()
+                        corners1 = detection1['corners'].reshape(-1, 2)
+                        
+                        # Get 3D object points for detected corners
+                        obj_pts1 = np.array([board_3d_points[int(id)] for id in ids1], dtype=np.float32)
+                        
+                        # Solve PnP to get board pose in camera 1 frame
+                        success1, rvec1, tvec1 = cv2.solvePnP(
+                            obj_pts1,
+                            corners1,
+                            camera_matrix1,
+                            dist_coeffs1,
+                            flags=cv2.SOLVEPNP_ITERATIVE
+                        )
+                        
+                        if success1:
+                            R1, _ = cv2.Rodrigues(rvec1)
+                            R_list_cam1.append(R1)
+                            T_list_cam1.append(tvec1)
+                    
+                    # For camera 2: Get board pose using solvePnP
+                    if len(detection2['ids']) >= 4:
+                        ids2 = detection2['ids'].flatten()
+                        corners2 = detection2['corners'].reshape(-1, 2)
+                        
+                        # Get 3D object points for detected corners
+                        obj_pts2 = np.array([board_3d_points[int(id)] for id in ids2], dtype=np.float32)
+                        
+                        # Solve PnP to get board pose in camera 2 frame
+                        success2, rvec2, tvec2 = cv2.solvePnP(
+                            obj_pts2,
+                            corners2,
+                            camera_matrix2,
+                            dist_coeffs2,
+                            flags=cv2.SOLVEPNP_ITERATIVE
+                        )
+                        
+                        if success2:
+                            R2, _ = cv2.Rodrigues(rvec2)
+                            R_list_cam2.append(R2)
+                            T_list_cam2.append(tvec2)
                 
-                result['stereo_calibration'] = {
-                    'reprojection_error': float(retval),
-                    'rotation_matrix': R.tolist(),
-                    'translation_vector': T.flatten().tolist(),
-                    'essential_matrix': E.tolist(),
-                    'fundamental_matrix': F.tolist(),
-                    'flags_used': stereo_flags,
-                    'pairs_used': len(object_points_list)
-                }
-            else:
-                result['stereo_calibration'] = {
-                    'success': False,
-                    'error': f'Not enough valid pairs for stereo calibration (found {len(object_points_list)}, need 3)'
-                }
+                if len(R_list_cam1) > 0 and len(R_list_cam2) > 0:
+                    # Average the board poses across all captures for stability
+                    R_board_cam1 = np.mean(R_list_cam1, axis=0)
+                    T_board_cam1 = np.mean(T_list_cam1, axis=0)
+                    R_board_cam2 = np.mean(R_list_cam2, axis=0)
+                    T_board_cam2 = np.mean(T_list_cam2, axis=0)
+                    
+                    # Compute relative transformation from camera 1 to camera 2
+                    R_board_cam1_inv = R_board_cam1.T
+                    R_board_cam2_inv = R_board_cam2.T
+                    
+                    # Relative rotation: R_2to1 = R1 * R2^T
+                    R_rel = R_board_cam1 @ R_board_cam2_inv
+                    
+                    # Relative translation: T_2to1 = T1 - R_2to1 * T2
+                    T_rel = T_board_cam1 - R_rel @ T_board_cam2
+                    
+                    # Compute baseline distance
+                    baseline = float(np.linalg.norm(T_rel))
+                    
+                    # Also compute fundamental matrix for reference
+                    F, mask_F = cv2.findFundamentalMat(
+                        combined_points1,
+                        combined_points2,
+                        method=cv2.RANSAC,
+                        ransacReprojThreshold=3.0,
+                        confidence=0.99
+                    )
+                    
+                    result['extrinsics'] = {
+                        'rotation_matrix': R_rel.tolist(),
+                        'translation_vector': T_rel.flatten().tolist(),
+                        'baseline_distance_mm': baseline,
+                        'fundamental_matrix': F.tolist() if F is not None else None,
+                        'method': 'PnP-based pose estimation using ChArUco 3D points',
+                        'calibration_type': 'extrinsics_only',
+                        'extrinsics_only': True,
+                        'board_poses_used': min(len(R_list_cam1), len(R_list_cam2)),
+                        'note': 'Translation is in millimeters based on board square_length parameter. Extrinsics computed from individual camera calibrations using PnP, not full stereo calibration.'
+                    }
+                else:
+                    result['extrinsics'] = {
+                        'success': False,
+                        'error': 'Could not compute board poses - need at least 4 corners detected in each camera'
+                    }
+            
+            else:  # calibration_method == 'full_stereo'
+                # Method 2: Full stereo calibration using cv2.stereoCalibrate
+                # Prepare object points and image points for stereo calibration
+                object_points = []
+                image_points1 = []
+                image_points2 = []
                 
+                for idx, (image1, image2) in enumerate(image_pairs):
+                    if not capture_results[idx].get('success', False):
+                        continue
+                    
+                    # Detect ChArUco corners in both images
+                    detection1 = detect_charuco_for_panorama(image1, board_config)
+                    detection2 = detect_charuco_for_panorama(image2, board_config)
+                    
+                    if detection1 is None or detection2 is None:
+                        continue
+                    
+                    # Find common corner IDs between both cameras
+                    ids1_flat = detection1['ids'].flatten()
+                    ids2_flat = detection2['ids'].flatten()
+                    common_ids = np.intersect1d(ids1_flat, ids2_flat)
+                    
+                    if len(common_ids) >= 4:  # Need at least 4 common points
+                        # Extract matching corners and object points
+                        matched_obj_points = []
+                        matched_corners1 = []
+                        matched_corners2 = []
+                        
+                        for corner_id in common_ids:
+                            idx1 = np.where(ids1_flat == corner_id)[0][0]
+                            idx2 = np.where(ids2_flat == corner_id)[0][0]
+                            matched_corners1.append(detection1['corners'][idx1])
+                            matched_corners2.append(detection2['corners'][idx2])
+                            matched_obj_points.append(board_3d_points[corner_id])
+                        
+                        object_points.append(np.array(matched_obj_points, dtype=np.float32))
+                        image_points1.append(np.array(matched_corners1, dtype=np.float32))
+                        image_points2.append(np.array(matched_corners2, dtype=np.float32))
+                
+                if len(object_points) >= 3:
+                    # Get image size
+                    image_size = image_pairs[0][0].shape[:2][::-1]  # (width, height)
+                    
+                    # Perform stereo calibration
+                    # Default to fixing intrinsics if no flags provided
+                    if stereo_flags is None:
+                        stereo_flags = cv2.CALIB_FIX_INTRINSIC
+                    
+                    retval, K1_out, d1_out, K2_out, d2_out, R, T, E, F = cv2.stereoCalibrate(
+                        object_points,
+                        image_points1,
+                        image_points2,
+                        camera_matrix1,
+                        dist_coeffs1,
+                        camera_matrix2,
+                        dist_coeffs2,
+                        image_size,
+                        flags=stereo_flags
+                    )
+                    
+                    # Compute baseline distance
+                    baseline = float(np.linalg.norm(T))
+                    
+                    result['extrinsics'] = {
+                        'rotation_matrix': R.tolist(),
+                        'translation_vector': T.flatten().tolist(),
+                        'baseline_distance_mm': baseline,
+                        'essential_matrix': E.tolist(),
+                        'fundamental_matrix': F.tolist(),
+                        'reprojection_error': float(retval),
+                        'method': 'Full stereo calibration using cv2.stereoCalibrate',
+                        'calibration_type': 'full_stereo',
+                        'extrinsics_only': False,
+                        'pairs_used': len(object_points),
+                        'note': 'Full stereo calibration jointly optimizing intrinsics and extrinsics. Translation is in millimeters based on board square_length parameter.'
+                    }
+                else:
+                    result['extrinsics'] = {
+                        'success': False,
+                        'error': f'Not enough valid stereo pairs for calibration. Found {len(object_points)} pairs with common corners, need at least 3.'
+                    }
+            
         except Exception as e:
             import traceback
             traceback.print_exc()
-            result['stereo_calibration'] = {
+            result['extrinsics'] = {
                 'success': False,
-                'error': f'Stereo calibration failed: {str(e)}'
+                'error': f'Extrinsics computation failed: {str(e)}'
             }
     
     return result

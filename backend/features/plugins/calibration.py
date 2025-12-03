@@ -57,8 +57,9 @@ class CalibrationPlugin(FeaturePlugin):
         self.board = None
         self._init_board()
         
-        # Calibration data storage
-        self.data_dir = Path("data/calibration")
+        # Calibration data storage - use absolute path
+        # Get the absolute path to this file, then navigate to data/calibration
+        self.data_dir = Path(__file__).resolve().parent.parent.parent.parent / 'data' / 'calibration'
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
         # Session storage
@@ -565,14 +566,34 @@ class CalibrationPlugin(FeaturePlugin):
         Load calibration from disk.
         
         Args:
-            name: Calibration file name (with or without extension) or path like "session_xxx/camera_id"
+            name: Calibration file name (with or without extension) or path like "session_xxx/camera_id" or "panorama_xxx/file.json"
             
         Returns:
             Calibration data
         """
-        # Check if name contains a path separator (session/camera format)
+        # Check if name contains a path separator (session/camera format or panorama/file format)
         if '/' in name:
-            # Handle session/camera_id format
+            # First try the exact path (for panorama session calibration files)
+            direct_path = self.data_dir / name
+            print(f"[CalibrationPlugin] Loading calibration: name={name}")
+            print(f"[CalibrationPlugin] data_dir={self.data_dir}")
+            print(f"[CalibrationPlugin] direct_path={direct_path}")
+            print(f"[CalibrationPlugin] exists={direct_path.exists()}")
+            
+            if direct_path.exists():
+                try:
+                    with open(direct_path, 'r') as f:
+                        return {
+                            "success": True,
+                            **json.load(f)
+                        }
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Error loading calibration from {direct_path}: {str(e)}"
+                    }
+            
+            # Handle session/camera_id format (session_xxx/camera_id/calibration_results.json)
             session_path = self.data_dir / name / "calibration_results.json"
             if session_path.exists():
                 try:
@@ -589,7 +610,7 @@ class CalibrationPlugin(FeaturePlugin):
             else:
                 return {
                     "success": False,
-                    "error": f"Calibration file not found: {session_path}"
+                    "error": f"Calibration file not found: {direct_path} or {session_path}"
                 }
         
         # Try NPZ first
@@ -708,16 +729,24 @@ class CalibrationPlugin(FeaturePlugin):
         """
         try:
             from pathlib import Path
-            import os
             
-            # If path contains / and doesn't end with .json, assume it's session/camera_id format
-            if '/' in calibration_path and not calibration_path.endswith('.json'):
-                # Construct full path to calibration_results.json
-                # Go up 3 levels from backend/features/plugins/ to get to root
-                calibration_dir = Path(os.path.dirname(__file__)).resolve() / '..' / '..' / '..' / 'data' / 'calibration'
-                full_path = (calibration_dir / calibration_path / 'calibration_results.json').resolve()
+            # Get the absolute path to data/calibration directory
+            calibration_dir = Path(__file__).resolve().parent.parent.parent.parent / 'data' / 'calibration'
+            
+            # If path contains /, treat it as relative to data/calibration directory
+            if '/' in calibration_path:
+                if calibration_path.endswith('.json'):
+                    # Direct path to a JSON file in a subdirectory (e.g., panorama_xxx/file.json)
+                    full_path = calibration_dir / calibration_path
+                    print(f"[CalibrationPlugin] Loading calibration from session file: {full_path}")
+                else:
+                    # Path to session/camera_id format (needs calibration_results.json appended)
+                    full_path = calibration_dir / calibration_path / 'calibration_results.json'
+                    print(f"[CalibrationPlugin] Loading calibration from session format: {full_path}")
             else:
+                # No slash - treat as absolute path
                 full_path = Path(calibration_path).resolve()
+                print(f"[CalibrationPlugin] Loading calibration from absolute path: {full_path}")
             
             with open(full_path, 'r') as f:
                 calibration_data = json.load(f)
@@ -726,11 +755,18 @@ class CalibrationPlugin(FeaturePlugin):
             calibration_data['camera_matrix'] = np.array(calibration_data['camera_matrix'])
             calibration_data['distortion_coeffs'] = np.array(calibration_data['distortion_coeffs'])
             
-            return calibration_data
+            # Return in the expected format with success flag
+            return {
+                'success': True,
+                **calibration_data
+            }
             
         except Exception as e:
             print(f"Error loading calibration: {e}")
-            return None
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
     @staticmethod
     def undistort_image(image: np.ndarray, camera_matrix: np.ndarray, 

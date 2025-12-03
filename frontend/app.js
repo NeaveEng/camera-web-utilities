@@ -3662,6 +3662,7 @@ function openPanoramaCalibration() {
     document.getElementById('panorama-results').style.display = 'none';
     document.getElementById('panorama-test-btn').style.display = 'none';
     document.getElementById('panorama-compute-btn').style.display = 'none';
+    document.getElementById('panorama-save-settings-btn').style.display = 'none';
     document.getElementById('panorama-capture-list').innerHTML = '';
     document.getElementById('toggle-panorama-auto-capture').classList.remove('active');
     updatePanoramaCaptureStatus();
@@ -3902,11 +3903,57 @@ async function loadPanoramaSession(sessionId) {
             await loadCalibrationList();
 
             // Set calibration dropdowns if values are stored in session
-            if (result.camera0_calibration) {
-                document.getElementById('panorama-camera0-calib').value = result.camera0_calibration;
+            // Use setTimeout to ensure DOM is updated
+            setTimeout(() => {
+                if (result.camera0_calibration) {
+                    const cam0Select = document.getElementById('panorama-camera0-calib');
+                    cam0Select.value = result.camera0_calibration;
+                    // If value didn't set (option doesn't exist), log warning
+                    if (cam0Select.value !== result.camera0_calibration) {
+                        console.warn('Camera 0 calibration not found in dropdown:', result.camera0_calibration);
+                    }
+                }
+                if (result.camera1_calibration) {
+                    const cam1Select = document.getElementById('panorama-camera1-calib');
+                    cam1Select.value = result.camera1_calibration;
+                    // If value didn't set (option doesn't exist), log warning
+                    if (cam1Select.value !== result.camera1_calibration) {
+                        console.warn('Camera 1 calibration not found in dropdown:', result.camera1_calibration);
+                    }
+                }
+            }, 100);
+
+            // Set use calibration checkbox
+            if (result.use_calibration !== undefined) {
+                document.getElementById('panorama-use-calibration').checked = result.use_calibration;
             }
-            if (result.camera1_calibration) {
-                document.getElementById('panorama-camera1-calib').value = result.camera1_calibration;
+
+            // Set calibration flags if stored
+            if (result.calibration_flags && Array.isArray(result.calibration_flags)) {
+                // Clear all flags first
+                document.getElementById('panorama-flag-fix-intrinsic').checked = false;
+                document.getElementById('panorama-flag-fix-focal-length').checked = false;
+                document.getElementById('panorama-flag-fix-principal-point').checked = false;
+                document.getElementById('panorama-flag-fix-aspect-ratio').checked = false;
+                document.getElementById('panorama-flag-same-focal-length').checked = false;
+                document.getElementById('panorama-flag-zero-tangent-dist').checked = false;
+
+                // Set flags from session
+                result.calibration_flags.forEach(flag => {
+                    if (flag === 'CALIB_FIX_INTRINSIC') {
+                        document.getElementById('panorama-flag-fix-intrinsic').checked = true;
+                    } else if (flag === 'CALIB_FIX_FOCAL_LENGTH') {
+                        document.getElementById('panorama-flag-fix-focal-length').checked = true;
+                    } else if (flag === 'CALIB_FIX_PRINCIPAL_POINT') {
+                        document.getElementById('panorama-flag-fix-principal-point').checked = true;
+                    } else if (flag === 'CALIB_FIX_ASPECT_RATIO') {
+                        document.getElementById('panorama-flag-fix-aspect-ratio').checked = true;
+                    } else if (flag === 'CALIB_SAME_FOCAL_LENGTH') {
+                        document.getElementById('panorama-flag-same-focal-length').checked = true;
+                    } else if (flag === 'CALIB_ZERO_TANGENT_DIST') {
+                        document.getElementById('panorama-flag-zero-tangent-dist').checked = true;
+                    }
+                });
             }
 
             await initializePanoramaPair();
@@ -4082,9 +4129,10 @@ async function capturePanoramaCalibration() {
                 statusEl.innerHTML = `<span class="status-icon">⚠️</span><span class="status-message">Capture ${result.capture_count}: Board not detected in both cameras</span>`;
             }
 
-            // Show compute button after first successful capture
+            // Show compute button and save settings button after first capture
             if (panoramaCaptureCount >= 1) {
                 document.getElementById('panorama-compute-btn').style.display = 'inline-block';
+                document.getElementById('panorama-save-settings-btn').style.display = 'inline-block';
             }
         } else {
             statusEl.innerHTML = `<span class="status-icon">❌</span><span class="status-message">Error: ${result.error}</span>`;
@@ -4127,6 +4175,70 @@ function updatePanoramaCaptureList() {
     }).join('');
 }
 
+async function savePanoramaSessionSettings() {
+    const btn = document.getElementById('panorama-save-settings-btn');
+    const originalText = btn.textContent;
+
+    try {
+        btn.disabled = true;
+        btn.textContent = '💾 Saving...';
+
+        const sessionId = panoramaSessionId;
+        if (!sessionId) {
+            await showAlert('Error', 'No active session to save');
+            return;
+        }
+
+        const useCalibration = document.getElementById('panorama-use-calibration').checked;
+        const cam0CalibName = document.getElementById('panorama-camera0-calib').value;
+        const cam1CalibName = document.getElementById('panorama-camera1-calib').value;
+
+        // Get calibration method
+        const calibrationMethod = document.querySelector('input[name="panorama-calibration-method"]:checked').value;
+
+        // Get selected flags
+        const flags = [];
+        if (document.getElementById('panorama-flag-fix-intrinsic').checked) flags.push('CALIB_FIX_INTRINSIC');
+        if (document.getElementById('panorama-flag-fix-focal-length').checked) flags.push('CALIB_FIX_FOCAL_LENGTH');
+        if (document.getElementById('panorama-flag-fix-principal-point').checked) flags.push('CALIB_FIX_PRINCIPAL_POINT');
+        if (document.getElementById('panorama-flag-fix-aspect-ratio').checked) flags.push('CALIB_FIX_ASPECT_RATIO');
+        if (document.getElementById('panorama-flag-same-focal-length').checked) flags.push('CALIB_SAME_FOCAL_LENGTH');
+        if (document.getElementById('panorama-flag-zero-tangent-dist').checked) flags.push('CALIB_ZERO_TANGENT_DIST');
+
+        const response = await fetch(`${API_BASE}/api/calibration/panorama/save-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sessionId,
+                use_calibration: useCalibration,
+                camera0_calibration: cam0CalibName,
+                camera1_calibration: cam1CalibName,
+                calibration_method: calibrationMethod,
+                flags: flags
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            btn.textContent = '✅ Saved!';
+            setTimeout(() => {
+                btn.textContent = originalText;
+            }, 2000);
+        } else {
+            await showAlert('Save Failed', result.error || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('Save settings error:', error);
+        await showAlert('Error', 'Failed to save settings: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        if (btn.textContent.includes('Saving')) {
+            btn.textContent = originalText;
+        }
+    }
+}
+
 async function computePanoramaCalibration() {
     const useCalibration = document.getElementById('panorama-use-calibration').checked;
     const statusEl = document.getElementById('panorama-detection-status');
@@ -4139,6 +4251,9 @@ async function computePanoramaCalibration() {
     // Collect selected calibration files
     const camera0Calib = document.getElementById('panorama-camera0-calib').value;
     const camera1Calib = document.getElementById('panorama-camera1-calib').value;
+
+    // Get calibration method
+    const calibrationMethod = document.querySelector('input[name="panorama-calibration-method"]:checked').value;
 
     // Collect calibration flags
     const flags = [];
@@ -4168,6 +4283,7 @@ async function computePanoramaCalibration() {
             body: JSON.stringify({
                 session_id: panoramaSessionId,
                 use_calibration: useCalibration,
+                calibration_method: calibrationMethod,
                 flags: flags,
                 camera0_calibration: camera0Calib || null,
                 camera1_calibration: camera1Calib || null
@@ -4211,6 +4327,7 @@ async function resetPanoramaSession() {
     document.getElementById('panorama-results').style.display = 'none';
     document.getElementById('panorama-test-btn').style.display = 'none';
     document.getElementById('panorama-compute-btn').style.display = 'none';
+    document.getElementById('panorama-save-settings-btn').style.display = 'none';
     document.getElementById('panorama-capture-list').innerHTML = '';
     updatePanoramaCaptureStatus();
 
@@ -4364,10 +4481,10 @@ function startPanoramaAutoCapture() {
     panoramaAutoCaptureInterval = setInterval(async () => {
         if (!panoramaAutoCapture) return;
 
+        const camera0Id = document.getElementById('panorama-camera0-select').value;
         const camera1Id = document.getElementById('panorama-camera1-select').value;
-        const camera2Id = document.getElementById('panorama-camera2-select').value;
 
-        if (!camera1Id || !camera2Id) return;
+        if (!camera0Id || !camera1Id) return;
 
         // Check if board is detected in both cameras
         try {
@@ -4383,8 +4500,8 @@ function startPanoramaAutoCapture() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    camera0_id: camera0Id,
                     camera1_id: camera1Id,
-                    camera2_id: camera2Id,
                     board_config: boardConfig
                 })
             });
@@ -4394,8 +4511,8 @@ function startPanoramaAutoCapture() {
             // Check if we have good detection in both cameras
             const hasGoodDetection = result.success &&
                 result.detected_both &&
-                result.corners_cam1 >= minCorners &&
-                result.corners_cam2 >= minCorners;
+                result.corners_cam0 >= minCorners &&
+                result.corners_cam1 >= minCorners;
 
             if (hasGoodDetection) {
                 // Check time since last capture
@@ -4409,10 +4526,10 @@ function startPanoramaAutoCapture() {
 
                 // Check if markers have moved enough (if we have previous marker data)
                 let shouldCapture = true;
-                if (result.corner_data_cam1 && panoramaLastCaptureMarkers) {
+                if (result.corner_data_cam0 && panoramaLastCaptureMarkers) {
                     // Build map of current markers by ID
                     const currentMarkers = new Map();
-                    result.corner_data_cam1.forEach(([id, x, y]) => {
+                    result.corner_data_cam0.forEach(([id, x, y]) => {
                         currentMarkers.set(id, [x, y]);
                     });
 
@@ -4451,10 +4568,10 @@ function startPanoramaAutoCapture() {
                 }
 
                 if (shouldCapture) {
-                    console.log(`Auto-capturing: ${result.corners_cam1}/${result.corners_cam2} corners detected`);
+                    console.log(`Auto-capturing: ${result.corners_cam0}/${result.corners_cam1} corners detected`);
 
                     // Store marker positions for next comparison
-                    panoramaLastCaptureMarkers = result.corner_data_cam1;
+                    panoramaLastCaptureMarkers = result.corner_data_cam0;
                     panoramaLastCaptureTime = now;
 
                     // Trigger capture

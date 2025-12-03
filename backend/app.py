@@ -427,22 +427,22 @@ def camera_stream(camera_id):
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-@app.route('/api/cameras/composite/<camera1_id>/<camera2_id>/stream')
-def composite_camera_stream(camera1_id, camera2_id):
+@app.route('/api/cameras/composite/<camera0_id>/<camera1_id>/stream')
+def composite_camera_stream(camera0_id, camera1_id):
     """MJPEG composite stream for two synchronized cameras side-by-side."""
     import cv2
     import numpy as np
     
-    print(f"[Composite Stream] Stream requested for cameras {camera1_id} and {camera2_id}")
+    print(f"[Composite Stream] Stream requested for cameras {camera0_id} and {camera1_id}")
     
     # Get/create and start synchronized pair BEFORE creating the response
     # This avoids blocking inside the generator which would prevent HTTP headers from being sent
-    sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+    sync_pair = sync_pair_manager.get_pair(camera0_id, camera1_id)
     
     if sync_pair is None:
         # If no sync pair, try to create one
         print(f"[Composite Stream] No existing pair, creating new one")
-        sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+        sync_pair = sync_pair_manager.create_pair(camera0_id, camera1_id)
         if sync_pair:
             print(f"[Composite Stream] Starting new sync pair...")
             sync_pair.start()
@@ -476,13 +476,13 @@ def composite_camera_stream(camera1_id, camera2_id):
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-@app.route('/api/cameras/composite/<camera1_id>/<camera2_id>/stream-with-overlay')
-def composite_camera_stream_with_overlay(camera1_id, camera2_id):
+@app.route('/api/cameras/composite/<camera0_id>/<camera1_id>/stream-with-overlay')
+def composite_camera_stream_with_overlay(camera0_id, camera1_id):
     """MJPEG composite stream with ChArUco detection overlay for panorama calibration."""
     import cv2
     import numpy as np
     
-    print(f"[Composite Stream Overlay] Stream requested for cameras {camera1_id} and {camera2_id}")
+    print(f"[Composite Stream Overlay] Stream requested for cameras {camera0_id} and {camera1_id}")
     
     # Get board config from query parameters
     board_width = int(request.args.get('board_width', 8))
@@ -500,11 +500,11 @@ def composite_camera_stream_with_overlay(camera1_id, camera2_id):
     }
     
     # Get/create and start synchronized pair
-    sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+    sync_pair = sync_pair_manager.get_pair(camera0_id, camera1_id)
     
     if sync_pair is None:
         print(f"[Composite Stream Overlay] No existing pair, creating new one")
-        sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+        sync_pair = sync_pair_manager.create_pair(camera0_id, camera1_id)
         if sync_pair:
             sync_pair.start()
     elif not sync_pair.is_running:
@@ -2203,17 +2203,17 @@ def panorama_check_detection():
     """
     try:
         data = request.json
-        camera1_id = data.get('camera0_id')
-        camera2_id = data.get('camera1_id')
+        camera0_id = data.get('camera0_id')
+        camera1_id = data.get('camera1_id')
         board_config = data.get('board_config')
         
-        if not camera1_id or not camera2_id or not board_config:
+        if not camera0_id or not camera1_id or not board_config:
             return jsonify({'success': False, 'error': 'Missing required parameters'}), 400
         
         # Get or create synchronized pair
-        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        sync_pair = sync_pair_manager.get_pair(camera0_id, camera1_id)
         if sync_pair is None:
-            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            sync_pair = sync_pair_manager.create_pair(camera0_id, camera1_id)
             sync_pair.start()
         
         # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
@@ -2224,10 +2224,10 @@ def panorama_check_detection():
             return jsonify({
                 'success': True,
                 'detected_both': False,
+                'detected_cam0': False,
                 'detected_cam1': False,
-                'detected_cam2': False,
+                'corners_cam0': 0,
                 'corners_cam1': 0,
-                'corners_cam2': 0,
                 'synchronized': False,
                 'waiting_for_frames': True
             })
@@ -2242,31 +2242,31 @@ def panorama_check_detection():
         detected_both = detection1 is not None and detection2 is not None
         
         # Extract corner positions with IDs for position tracking
+        corner_data_cam0 = None
         corner_data_cam1 = None
-        corner_data_cam2 = None
         
         if detection1:
             # Create list of [id, x, y] for each corner
             ids = detection1['ids'].flatten().tolist()
             corners = detection1['corners'].reshape(-1, 2)
-            corner_data_cam1 = [[int(ids[i]), float(corners[i, 0]), float(corners[i, 1])] 
+            corner_data_cam0 = [[int(ids[i]), float(corners[i, 0]), float(corners[i, 1])] 
                                for i in range(len(ids))]
         
         if detection2:
             ids = detection2['ids'].flatten().tolist()
             corners = detection2['corners'].reshape(-1, 2)
-            corner_data_cam2 = [[int(ids[i]), float(corners[i, 0]), float(corners[i, 1])] 
+            corner_data_cam1 = [[int(ids[i]), float(corners[i, 0]), float(corners[i, 1])] 
                                for i in range(len(ids))]
         
         return jsonify({
             'success': True,
             'detected_both': detected_both,
-            'detected_cam1': detection1 is not None,
-            'detected_cam2': detection2 is not None,
-            'corners_cam1': detection1['num_corners'] if detection1 else 0,
-            'corners_cam2': detection2['num_corners'] if detection2 else 0,
+            'detected_cam0': detection1 is not None,
+            'detected_cam1': detection2 is not None,
+            'corners_cam0': detection1['num_corners'] if detection1 else 0,
+            'corners_cam1': detection2['num_corners'] if detection2 else 0,
+            'corner_data_cam0': corner_data_cam0,
             'corner_data_cam1': corner_data_cam1,
-            'corner_data_cam2': corner_data_cam2,
             'synchronized': True,
             'waiting_for_frames': False
         })
@@ -2289,21 +2289,21 @@ def panorama_capture():
         from datetime import datetime
         
         data = request.json
-        camera1_id = data.get('camera0_id')
-        camera2_id = data.get('camera1_id')
+        camera0_id = data.get('camera0_id')
+        camera1_id = data.get('camera1_id')
         board_config = data.get('board_config')
         session_id = data.get('session_id')
         
-        if not camera1_id or not camera2_id:
+        if not camera0_id or not camera1_id:
             return jsonify({'success': False, 'error': 'Both camera IDs required'}), 400
         
         if not board_config:
             return jsonify({'success': False, 'error': 'Board configuration required'}), 400
         
         # Get or create synchronized pair
-        sync_pair = sync_pair_manager.get_pair(camera1_id, camera2_id)
+        sync_pair = sync_pair_manager.get_pair(camera0_id, camera1_id)
         if sync_pair is None:
-            sync_pair = sync_pair_manager.create_pair(camera1_id, camera2_id)
+            sync_pair = sync_pair_manager.create_pair(camera0_id, camera1_id)
             sync_pair.start()
         
         # Get hardware-synchronized frames (max 16ms difference = 1 frame at 60fps)
@@ -2327,8 +2327,8 @@ def panorama_capture():
             metadata_file = os.path.join(session_dir, 'session_info.json')
             metadata = {
                 'session_id': session_id,
-                'camera0_id': camera1_id,
-                'camera1_id': camera2_id,
+                'camera0_id': camera0_id,
+                'camera1_id': camera1_id,
                 'board_config': board_config,
                 'created_at': datetime.now().isoformat()
             }
@@ -2336,8 +2336,8 @@ def panorama_capture():
                 json.dump(metadata, f, indent=2)
             
             panorama_sessions[session_id] = {
-                'camera0_id': camera1_id,
-                'camera1_id': camera2_id,
+                'camera0_id': camera0_id,
+                'camera1_id': camera1_id,
                 'board_config': board_config,
                 'image_pairs': [],
                 'capture_count': 0,
@@ -2349,18 +2349,18 @@ def panorama_capture():
         capture_num = session['capture_count']
         
         # Save images to disk
+        cam0_dir = os.path.join(session['session_dir'], camera0_id)
         cam1_dir = os.path.join(session['session_dir'], camera1_id)
-        cam2_dir = os.path.join(session['session_dir'], camera2_id)
+        os.makedirs(cam0_dir, exist_ok=True)
         os.makedirs(cam1_dir, exist_ok=True)
-        os.makedirs(cam2_dir, exist_ok=True)
         
+        cam0_filename = f"image_{capture_num:04d}.jpg"
         cam1_filename = f"image_{capture_num:04d}.jpg"
-        cam2_filename = f"image_{capture_num:04d}.jpg"
+        cam0_path = os.path.join(cam0_dir, cam0_filename)
         cam1_path = os.path.join(cam1_dir, cam1_filename)
-        cam2_path = os.path.join(cam2_dir, cam2_filename)
         
-        cv2.imwrite(cam1_path, frame1)
-        cv2.imwrite(cam2_path, frame2)
+        cv2.imwrite(cam0_path, frame1)
+        cv2.imwrite(cam1_path, frame2)
         
         # Also keep in memory for immediate processing
         session['image_pairs'].append((frame1.copy(), frame2.copy()))
@@ -2386,11 +2386,127 @@ def panorama_capture():
             'capture_count': capture_num,
             'detected_both': detected_both,
             'matches': matches,
-            'corners_cam1': detection1['num_corners'] if detection1 else 0,
-            'corners_cam2': detection2['num_corners'] if detection2 else 0,
-            'cam1_path': cam1_path,
-            'cam2_path': cam2_path
+            'corners_cam0': detection1['num_corners'] if detection1 else 0,
+            'corners_cam1': detection2['num_corners'] if detection2 else 0,
+            'cam0_path': cam0_path,
+            'cam1_path': cam1_path
         })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/calibration/panorama/save-settings', methods=['POST'])
+def panorama_save_settings():
+    """
+    Save panorama session settings (calibration files, flags) without running calibration.
+    """
+    import cv2
+    
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        use_calibration = data.get('use_calibration', True)
+        calibration_method = data.get('calibration_method', 'extrinsics_only')
+        cam0_calib_name = data.get('camera0_calibration')
+        cam1_calib_name = data.get('camera1_calibration')
+        flag_names = data.get('flags', [])
+        
+        if not session_id or session_id not in panorama_sessions:
+            return jsonify({'success': False, 'error': 'Invalid or expired session'}), 400
+        
+        session = panorama_sessions[session_id]
+        
+        # Convert flag names to OpenCV flags value
+        flags_value = 0
+        flag_mapping = {
+            'CALIB_FIX_INTRINSIC': cv2.CALIB_FIX_INTRINSIC,
+            'CALIB_FIX_FOCAL_LENGTH': cv2.CALIB_FIX_FOCAL_LENGTH,
+            'CALIB_FIX_PRINCIPAL_POINT': cv2.CALIB_FIX_PRINCIPAL_POINT,
+            'CALIB_FIX_ASPECT_RATIO': cv2.CALIB_FIX_ASPECT_RATIO,
+            'CALIB_SAME_FOCAL_LENGTH': cv2.CALIB_SAME_FOCAL_LENGTH,
+            'CALIB_ZERO_TANGENT_DIST': cv2.CALIB_ZERO_TANGENT_DIST
+        }
+        
+        for flag_name in flag_names:
+            if flag_name in flag_mapping:
+                flags_value |= flag_mapping[flag_name]
+        
+        # Load calibrations if needed (to copy them)
+        cam0_calib = None
+        cam1_calib = None
+        
+        if use_calibration and cam0_calib_name and cam1_calib_name:
+            calibration_plugin = feature_manager.get_plugin('Camera Calibration')
+            if calibration_plugin:
+                try:
+                    cam0_result = calibration_plugin.load_calibration(cam0_calib_name)
+                    if cam0_result.get('success'):
+                        cam0_calib = {
+                            'camera_matrix': np.array(cam0_result['camera_matrix']),
+                            'distortion_coeffs': np.array(cam0_result['distortion_coeffs'])
+                        }
+                    
+                    cam1_result = calibration_plugin.load_calibration(cam1_calib_name)
+                    if cam1_result.get('success'):
+                        cam1_calib = {
+                            'camera_matrix': np.array(cam1_result['camera_matrix']),
+                            'distortion_coeffs': np.array(cam1_result['distortion_coeffs'])
+                        }
+                except Exception as e:
+                    print(f"Warning: Could not load calibrations: {e}")
+        
+        # Update session metadata
+        if 'session_dir' in session:
+            session_info_path = Path(session['session_dir']) / 'session_info.json'
+            if session_info_path.exists():
+                try:
+                    with open(session_info_path, 'r') as f:
+                        session_info = json.load(f)
+                    
+                    # Copy calibration files if available
+                    calib_copies = {}
+                    if cam0_calib and cam0_calib_name:
+                        cam0_calib_copy_path = Path(session['session_dir']) / f"camera0_calibration_{cam0_calib_name.replace('/', '_')}.json"
+                        with open(cam0_calib_copy_path, 'w') as f:
+                            json.dump({
+                                'camera_matrix': cam0_calib['camera_matrix'].tolist(),
+                                'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
+                                'source': cam0_calib_name
+                            }, f, indent=2)
+                        calib_copies['camera0_calibration_file'] = str(cam0_calib_copy_path.name)
+                    
+                    if cam1_calib and cam1_calib_name:
+                        cam1_calib_copy_path = Path(session['session_dir']) / f"camera1_calibration_{cam1_calib_name.replace('/', '_')}.json"
+                        with open(cam1_calib_copy_path, 'w') as f:
+                            json.dump({
+                                'camera_matrix': cam1_calib['camera_matrix'].tolist(),
+                                'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
+                                'source': cam1_calib_name
+                            }, f, indent=2)
+                        calib_copies['camera1_calibration_file'] = str(cam1_calib_copy_path.name)
+                    
+                    # Update metadata
+                    session_info['camera0_calibration'] = cam0_calib_name
+                    session_info['camera1_calibration'] = cam1_calib_name
+                    session_info['calibration_method'] = calibration_method
+                    session_info['calibration_flags'] = flag_names
+                    session_info['calibration_flags_value'] = flags_value if flags_value > 0 else None
+                    session_info['use_calibration'] = use_calibration
+                    session_info.update(calib_copies)
+                    
+                    with open(session_info_path, 'w') as f:
+                        json.dump(session_info, f, indent=2)
+                    
+                    return jsonify({'success': True, 'message': 'Session settings saved'})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    return jsonify({'success': False, 'error': f'Failed to save settings: {str(e)}'}), 500
+        
+        return jsonify({'success': False, 'error': 'Session directory not found'}), 400
         
     except Exception as e:
         import traceback
@@ -2410,6 +2526,7 @@ def panorama_compute():
         data = request.json
         session_id = data.get('session_id')
         use_calibration = data.get('use_calibration', True)
+        calibration_method = data.get('calibration_method', 'extrinsics_only')  # 'extrinsics_only' or 'full_stereo'
         flag_names = data.get('flags', [])
         cam0_calib_name = data.get('camera0_calibration')
         cam1_calib_name = data.get('camera1_calibration')
@@ -2510,11 +2627,12 @@ def panorama_compute():
             session['board_config'],
             cam0_calib,
             cam1_calib,
-            flags_value if flags_value > 0 else None
+            flags_value if flags_value > 0 else None,
+            calibration_method=calibration_method
         )
         
         if result['success']:
-            # Save calibration
+            # Save calibration to global settings directory
             save_path = save_panorama_calibration(
                 result,
                 session['camera0_id'],
@@ -2522,7 +2640,15 @@ def panorama_compute():
             )
             result['save_path'] = save_path
             
-            # Update session metadata with calibration file references
+            # Also save to session directory for archival
+            session_calib_path = None
+            if 'session_dir' in session:
+                session_calib_file = Path(session['session_dir']) / 'panorama_calibration_results.json'
+                with open(session_calib_file, 'w') as f:
+                    json.dump(result, f, indent=2)
+                session_calib_path = str(session_calib_file)
+            
+            # Update session metadata with calibration file references and copy calibration files
             if 'session_dir' in session:
                 session_info_path = Path(session['session_dir']) / 'session_info.json'
                 if session_info_path.exists():
@@ -2530,11 +2656,36 @@ def panorama_compute():
                         with open(session_info_path, 'r') as f:
                             session_info = json.load(f)
                         
-                        # Add calibration file references
+                        # Copy individual calibration files to session directory for archival
+                        calib_copies = {}
+                        if cam0_calib and cam0_calib_name:
+                            cam0_calib_copy_path = Path(session['session_dir']) / f"camera0_calibration_{cam0_calib_name.replace('/', '_')}.json"
+                            with open(cam0_calib_copy_path, 'w') as f:
+                                json.dump({
+                                    'camera_matrix': cam0_calib['camera_matrix'].tolist(),
+                                    'distortion_coeffs': cam0_calib['distortion_coeffs'].tolist(),
+                                    'source': cam0_calib_name
+                                }, f, indent=2)
+                            calib_copies['camera0_calibration_file'] = str(cam0_calib_copy_path.name)
+                        
+                        if cam1_calib and cam1_calib_name:
+                            cam1_calib_copy_path = Path(session['session_dir']) / f"camera1_calibration_{cam1_calib_name.replace('/', '_')}.json"
+                            with open(cam1_calib_copy_path, 'w') as f:
+                                json.dump({
+                                    'camera_matrix': cam1_calib['camera_matrix'].tolist(),
+                                    'distortion_coeffs': cam1_calib['distortion_coeffs'].tolist(),
+                                    'source': cam1_calib_name
+                                }, f, indent=2)
+                            calib_copies['camera1_calibration_file'] = str(cam1_calib_copy_path.name)
+                        
+                        # Add calibration metadata
                         session_info['camera0_calibration'] = cam0_calib_name if cam0_calib_name else None
                         session_info['camera1_calibration'] = cam1_calib_name if cam1_calib_name else None
-                        session_info['calibration_flags'] = flags_value if flags_value > 0 else None
-                        session_info['calibration_result_path'] = save_path
+                        session_info['calibration_flags'] = flag_names  # Store flag names for readability
+                        session_info['calibration_flags_value'] = flags_value if flags_value > 0 else None
+                        session_info['calibration_result_path'] = save_path  # Global path
+                        session_info['session_calibration_path'] = session_calib_path  # Session-local path
+                        session_info.update(calib_copies)
                         
                         with open(session_info_path, 'w') as f:
                             json.dump(session_info, f, indent=2)
@@ -2593,6 +2744,19 @@ def list_calibrations():
                             'path': str(calib_file.relative_to(data_dir.parent))
                         })
         
+        # Also check panorama session directories for local calibration copies
+        for session_dir in data_dir.glob('panorama_*'):
+            if session_dir.is_dir():
+                # Look for copied calibration files
+                for calib_file in session_dir.glob('camera*_calibration_*.json'):
+                    # Use path relative to data_dir (calibration directory), not data_dir.parent
+                    relative_path = str(calib_file.relative_to(data_dir))
+                    calibrations.append({
+                        'name': relative_path,
+                        'type': 'json',
+                        'path': str(calib_file.relative_to(data_dir.parent))
+                    })
+        
         return jsonify({'success': True, 'calibrations': calibrations})
         
     except Exception as e:
@@ -2621,8 +2785,8 @@ def panorama_list_sessions():
                     
                     sessions.append({
                         'session_id': session_dir.name,
+                        'camera0_id': metadata.get('camera0_id'),
                         'camera1_id': metadata.get('camera1_id'),
-                        'camera2_id': metadata.get('camera2_id'),
                         'created_at': metadata.get('created_at'),
                         'image_count': image_count // 2  # Divide by 2 since we have pairs
                     })
@@ -2665,58 +2829,58 @@ def panorama_load_session():
         
         # Load all image pairs from session
         # Images are stored in camera-specific subdirectories: 0/, 1/, etc.
-        camera1_dir = session_dir / str(metadata['camera0_id'])
-        camera2_dir = session_dir / str(metadata['camera1_id'])
+        camera0_dir = session_dir / str(metadata['camera0_id'])
+        camera1_dir = session_dir / str(metadata['camera1_id'])
         
-        if not camera1_dir.exists() or not camera2_dir.exists():
+        if not camera0_dir.exists() or not camera1_dir.exists():
             return jsonify({'success': False, 'error': 'Camera directories not found in session'}), 404
         
         # Get sorted list of images from each camera directory
+        camera0_files = sorted(camera0_dir.glob('image_*.jpg'))
         camera1_files = sorted(camera1_dir.glob('image_*.jpg'))
-        camera2_files = sorted(camera2_dir.glob('image_*.jpg'))
         
         # Match images by index (they should be captured in pairs)
         image_pairs = []
         capture_info = []
         
-        for img1_path, img2_path in zip(camera1_files, camera2_files):
+        for img0_path, img1_path in zip(camera0_files, camera1_files):
+            img0 = cv2.imread(str(img0_path))
             img1 = cv2.imread(str(img1_path))
-            img2 = cv2.imread(str(img2_path))
             
-            if img1 is not None and img2 is not None:
-                image_pairs.append((img1, img2))
+            if img0 is not None and img1 is not None:
+                image_pairs.append((img0, img1))
                 
                 # Detect markers in both images to get match count
                 from backend.panorama_utils import detect_charuco_for_panorama, match_charuco_corners
                 
                 detected_both = False
                 matches = 0
+                corners_cam0 = 0
                 corners_cam1 = 0
-                corners_cam2 = 0
                 
                 try:
+                    detection0 = detect_charuco_for_panorama(img0, metadata['board_config'])
                     detection1 = detect_charuco_for_panorama(img1, metadata['board_config'])
-                    detection2 = detect_charuco_for_panorama(img2, metadata['board_config'])
                     
-                    if detection1 is not None and detection2 is not None:
+                    if detection0 is not None and detection1 is not None:
+                        corners_cam0 = detection0['num_corners']
                         corners_cam1 = detection1['num_corners']
-                        corners_cam2 = detection2['num_corners']
                         
                         # Try to match corners
                         try:
-                            points1, points2 = match_charuco_corners(detection1, detection2)
-                            matches = len(points1)
+                            points0, points1 = match_charuco_corners(detection0, detection1)
+                            matches = len(points0)
                             detected_both = True
                         except ValueError:
                             pass
                 except Exception as e:
-                    print(f"Detection error for {img1_path.name}: {e}")
+                    print(f"Detection error for {img0_path.name}: {e}")
                 
                 capture_info.append({
                     'detected_both': detected_both,
                     'matches': matches,
-                    'corners_cam1': corners_cam1,
-                    'corners_cam2': corners_cam2
+                    'corners_cam0': corners_cam0,
+                    'corners_cam1': corners_cam1
                 })
         
         # Create session in memory
@@ -2729,6 +2893,21 @@ def panorama_load_session():
             'session_dir': str(session_dir)
         }
         
+        # Check if local calibration files exist in session directory
+        local_cam0_calib = None
+        local_cam1_calib = None
+        
+        # Look for calibration files saved in the session
+        if metadata.get('camera0_calibration_file'):
+            cam0_file = session_dir / metadata['camera0_calibration_file']
+            if cam0_file.exists():
+                local_cam0_calib = f"{session_id}/{metadata['camera0_calibration_file']}"
+        
+        if metadata.get('camera1_calibration_file'):
+            cam1_file = session_dir / metadata['camera1_calibration_file']
+            if cam1_file.exists():
+                local_cam1_calib = f"{session_id}/{metadata['camera1_calibration_file']}"
+        
         return jsonify({
             'success': True,
             'session_id': session_id,
@@ -2737,8 +2916,10 @@ def panorama_load_session():
             'board_config': metadata['board_config'],
             'image_count': len(image_pairs),
             'captures': capture_info,
-            'camera0_calibration': metadata.get('camera0_calibration'),
-            'camera1_calibration': metadata.get('camera1_calibration')
+            'camera0_calibration': local_cam0_calib or metadata.get('camera0_calibration'),
+            'camera1_calibration': local_cam1_calib or metadata.get('camera1_calibration'),
+            'calibration_flags': metadata.get('calibration_flags', []),
+            'use_calibration': metadata.get('use_calibration', True)
         })
         
     except Exception as e:

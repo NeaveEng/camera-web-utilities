@@ -816,9 +816,43 @@
 
                         <!-- Calibration Flags -->
                         <div class="form-section">
-                            <h3>Calibration Flags</h3>
+                            <h3>Calibration Method</h3>
                             <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
-                                For stereo calibration (computing extrinsics only):
+                                Choose how to compute the relationship between cameras:
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="radio" name="panorama-calibration-method"
+                                        id="panorama-method-extrinsics" value="extrinsics_only" checked>
+                                    Extrinsics Only (Recommended)
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    <strong>Uses:</strong> Individual camera calibrations + PnP pose estimation<br>
+                                    <strong>Computes:</strong> Relative rotation and translation between cameras<br>
+                                    <strong>Best for:</strong> Divergent cameras with pre-calibrated intrinsics<br>
+                                    <em>✓ More reliable for panorama stitching with separate calibrations</em>
+                                </small>
+                            </div>
+                            <div class="form-group">
+                                <label>
+                                    <input type="radio" name="panorama-calibration-method" id="panorama-method-stereo"
+                                        value="full_stereo">
+                                    Full Stereo Calibration
+                                </label>
+                                <small style="display: block; margin-left: 20px; color: #666;">
+                                    <strong>Uses:</strong> OpenCV stereoCalibrate()<br>
+                                    <strong>Computes:</strong> Joint optimization of intrinsics and extrinsics<br>
+                                    <strong>Best for:</strong> Cameras with overlapping views needing refinement<br>
+                                    <em>⚠️ May be less accurate for divergent cameras or minimal overlap</em>
+                                </small>
+                            </div>
+                        </div>
+
+                        <!-- Stereo Calibration Flags (only shown for full_stereo method) -->
+                        <div class="form-section" id="panorama-stereo-flags-section">
+                            <h3>Stereo Calibration Flags</h3>
+                            <div style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
+                                Configure stereo calibration behavior (only applies to Full Stereo Calibration):
                             </div>
                             <div class="form-group">
                                 <label>
@@ -826,7 +860,11 @@
                                     Fix intrinsic parameters
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Use pre-calibrated camera matrices and distortion coefficients
+                                    <strong>Use when:</strong> You have pre-calibrated camera matrices and distortion
+                                    coefficients<br>
+                                    <strong>Don't use when:</strong> You want to refine intrinsics during stereo
+                                    calibration (less accurate)<br>
+                                    <em>✓ Recommended for panorama calibration with individual camera calibrations</em>
                                 </small>
                             </div>
                             <div class="form-group">
@@ -835,7 +873,11 @@
                                     Fix focal length
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Keep focal length fixed (fx, fy)
+                                    <strong>Use when:</strong> Focal length (fx, fy) is known and accurate from
+                                    individual calibration<br>
+                                    <strong>Don't use when:</strong> Camera zoom or focus has changed since individual
+                                    calibration<br>
+                                    <em>Typically enabled with "Fix intrinsic parameters"</em>
                                 </small>
                             </div>
                             <div class="form-group">
@@ -844,7 +886,10 @@
                                     Fix principal point
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Keep principal point fixed (cx, cy)
+                                    <strong>Use when:</strong> Principal point (cx, cy) is known from individual
+                                    calibration<br>
+                                    <strong>Don't use when:</strong> Camera sensor alignment may have shifted<br>
+                                    <em>Safe to enable if cameras are rigidly mounted and haven't been disassembled</em>
                                 </small>
                             </div>
                             <div class="form-group">
@@ -853,7 +898,9 @@
                                     Fix aspect ratio
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Enforce fx/fy = constant
+                                    <strong>Use when:</strong> Pixel aspect ratio (fx/fy) is known and square<br>
+                                    <strong>Don't use when:</strong> Using anamorphic lenses or specialized sensors<br>
+                                    <em>Most modern cameras have square pixels (fx ≈ fy)</em>
                                 </small>
                             </div>
                             <div class="form-group">
@@ -862,7 +909,9 @@
                                     Same focal length
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Both cameras have same focal length
+                                    <strong>Use when:</strong> Both cameras have identical lenses and focal lengths<br>
+                                    <strong>Don't use when:</strong> Cameras have different lenses or zoom settings<br>
+                                    <em>⚠️ Only enable for identical camera models with matched optics</em>
                                 </small>
                             </div>
                             <div class="form-group">
@@ -871,7 +920,11 @@
                                     Zero tangential distortion
                                 </label>
                                 <small style="display: block; margin-left: 20px; color: #666;">
-                                    Set tangential distortion (p1, p2) to zero
+                                    <strong>Use when:</strong> Lenses are well-aligned (p1, p2 ≈ 0 from individual
+                                    calibration)<br>
+                                    <strong>Don't use when:</strong> Individual calibration shows significant tangential
+                                    distortion<br>
+                                    <em>Most high-quality lenses have negligible tangential distortion</em>
                                 </small>
                             </div>
                         </div>
@@ -950,6 +1003,10 @@
                                 <button id="panorama-capture-btn" class="btn btn-primary"
                                     onclick="capturePanoramaCalibration()" style="width: 100%;">
                                     📸 Capture Image Pair
+                                </button>
+                                <button id="panorama-save-settings-btn" class="btn btn-info"
+                                    onclick="savePanoramaSessionSettings()" style="display: none; width: 100%;">
+                                    💾 Save Session Settings
                                 </button>
                                 <button id="panorama-compute-btn" class="btn btn-success"
                                     onclick="computePanoramaCalibration()" style="display: none; width: 100%;">
